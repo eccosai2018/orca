@@ -282,7 +282,7 @@ for arg in "$@"; do
   esac
 done
 
-trailer="\${ORCA_GIT_COMMIT_TRAILER:-Co-authored-by: Echos 2018 AI Labs}"
+trailer="\${ORCA_GIT_COMMIT_TRAILER:-Co-authored-by: Echos 2018 AI Labs <africa@echos-ai.co.zm>}"
 
 has_explicit_commit_message() {
   local arg
@@ -700,7 +700,7 @@ exit /b %ERRORLEVEL%
 
 const WIN32_GIT_PS_WRAPPER = String.raw`$ErrorActionPreference = 'Stop'
 $realGit = if ($env:ORCA_REAL_GIT) { $env:ORCA_REAL_GIT } else { 'git' }
-$trailer = if ($env:ORCA_GIT_COMMIT_TRAILER) { $env:ORCA_GIT_COMMIT_TRAILER } else { 'Co-authored-by: Echos 2018 AI Labs' }
+$trailer = if ($env:ORCA_GIT_COMMIT_TRAILER) { $env:ORCA_GIT_COMMIT_TRAILER } else { 'Co-authored-by: Echos 2018 AI Labs <africa@echos-ai.co.zm>' }
 
 if ($args -contains '--dry-run') {
   & $realGit @args

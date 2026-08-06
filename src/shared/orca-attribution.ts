@@ -3,4 +3,4 @@
 // the terminal git/gh shim and the AI commit-message generator so the two
 // code paths agree on the exact string.
 
-export const ORCA_GIT_COMMIT_TRAILER = 'Co-authored-by: Echos 2018 AI Labs'
+export const ORCA_GIT_COMMIT_TRAILER = 'Co-authored-by: Echos 2018 AI Labs <africa@echos-ai.co.zm>'
