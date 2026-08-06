@@ -2,7 +2,7 @@
   "name": "orca",
   "version": "1.4.165-rc.0",
   "description": "Next-gen IDE for parallel agentic development",
-  "homepage": "https://github.com/stablyai/orca",
+  "homepage": "https://github.com/eccosai2018/orca",
   "author": "stablyai",
   "bin": {
     "orca": "./out/cli/index.js",

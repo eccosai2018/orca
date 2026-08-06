@@ -36,8 +36,8 @@ describe('release channel', () => {
     // Why adhoc gets a third repo rather than sharing hourly's: an unlanded
     // branch build must never surface to someone who only meant to ride main.
     expect(getReleaseRepoForChannel('adhoc')).toBe('stablyai/orca-adhoc')
-    expect(getReleaseRepoForChannel('stable')).toBe('stablyai/orca')
-    expect(getReleaseRepoForChannel('rc')).toBe('stablyai/orca')
+    expect(getReleaseRepoForChannel('stable')).toBe('eccosai2018/orca')
+    expect(getReleaseRepoForChannel('rc')).toBe('eccosai2018/orca')
   })
 
   it('marks exactly the dev channels as having their own repo', () => {
@@ -54,15 +54,15 @@ describe('release channel', () => {
       'https://github.com/stablyai/orca-hourly/releases/tag/v1.4.160-hourly.202607281400'
     )
     expect(getReleaseNotesUrlForVersion('1.4.160')).toBe(
-      'https://github.com/stablyai/orca/releases/tag/v1.4.160'
+      'https://github.com/eccosai2018/orca/releases/tag/v1.4.160'
     )
     expect(getReleaseNotesUrlForVersion('v1.4.160-rc.3')).toBe(
-      'https://github.com/stablyai/orca/releases/tag/v1.4.160-rc.3'
+      'https://github.com/eccosai2018/orca/releases/tag/v1.4.160-rc.3'
     )
     expect(getReleaseNotesUrlForVersion('1.4.160-adhoc.20260728140533')).toBe(
       'https://github.com/stablyai/orca-adhoc/releases/tag/v1.4.160-adhoc.20260728140533'
     )
-    expect(getReleaseNotesUrlForVersion(null)).toBe('https://github.com/stablyai/orca/releases')
+    expect(getReleaseNotesUrlForVersion(null)).toBe('https://github.com/eccosai2018/orca/releases')
   })
 
   it('round-trips an hourly version stamp as UTC', () => {
