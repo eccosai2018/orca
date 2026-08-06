@@ -663,7 +663,7 @@ function deferHeadlessServeInstall(phase: 'download' | 'install', version: strin
     )
   }
   sendErrorStatus(
-    'This orca serve process was not started by an update-capable supervisor. Keep it running and update Orca through its service manager.',
+    'This orca serve process was not started by an update-capable supervisor. Keep it running and update Dark Factory through its service manager.',
     true
   )
   return true
@@ -743,7 +743,7 @@ async function performQuitAndInstall(): Promise<void> {
           }
         )
         sendErrorStatus(
-          'Could not prepare the supervised server restart. Orca remains running.',
+          'Could not prepare the supervised server restart. Dark Factory remains running.',
           true
         )
         resetQuitForUpdateState()
@@ -839,7 +839,7 @@ async function performQuitAndInstall(): Promise<void> {
         // Why: past the native invoke this is the same pre-commit failure the event path reports, so it gets the same copy; only a pre-native exception can be helped by a restart.
         message: quitAndInstallNativeInvokedBeforeReset
           ? getPreCommitInstallFailureMessage()
-          : 'Could not restart to install the update. Quit and reopen Orca, then try again.'
+          : 'Could not restart to install the update. Quit and reopen Dark Factory, then try again.'
       }
     )
   }
@@ -861,8 +861,8 @@ function resetQuitForUpdateState(): void {
  */
 function getPreCommitInstallFailureMessage(): string {
   return process.platform === 'darwin'
-    ? 'Could not restart to install the update. Quit and reopen Orca, then try again.'
-    : 'Could not start the update installer. Orca remains open.'
+    ? 'Could not restart to install the update. Quit and reopen Dark Factory, then try again.'
+    : 'Could not start the update installer. Dark Factory remains open.'
 }
 
 /**
@@ -1753,16 +1753,16 @@ const LINUX_PACKAGE_RECOVERY_MESSAGES: Record<LinuxPackageRecoveryUnavailableRea
   'not-regular':
     'The downloaded package is no longer a valid file in the update cache. Download the update again, or get it from the official release page.',
   'hash-mismatch':
-    'The downloaded package no longer matches the verified release, so Orca will not hand it to a package manager. Download the update again, or get it from the official release page.',
+    'The downloaded package no longer matches the verified release, so Dark Factory will not hand it to a package manager. Download the update again, or get it from the official release page.',
   'read-failed':
-    'Orca could not read the downloaded package. Download the update again, or get it from the official release page.',
+    'Dark Factory could not read the downloaded package. Download the update again, or get it from the official release page.',
   'no-sudo':
-    'No sudo command was found in the system directories, so Orca cannot build a safe install command. Show the package and install it with your package manager.',
+    'No sudo command was found in the system directories, so Dark Factory cannot build a safe install command. Show the package and install it with your package manager.',
   'no-package-manager':
-    'No supported package manager was found in the system directories, so Orca cannot build a safe install command. Show the package and install it with your package manager.',
+    'No supported package manager was found in the system directories, so Dark Factory cannot build a safe install command. Show the package and install it with your package manager.',
   // Defensive: capture only ever tracks absolute cache paths, so this reports a bug rather than a machine state.
   'invalid-package-path':
-    'The downloaded package is not at a usable path, so Orca cannot build a safe install command. Show the package and install it with your package manager.'
+    'The downloaded package is not at a usable path, so Dark Factory cannot build a safe install command. Show the package and install it with your package manager.'
 }
 
 // Why: clearing the artifact alone would leave the renderer's actions enabled; the status must lose its recovery too.

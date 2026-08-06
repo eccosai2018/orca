@@ -118,12 +118,12 @@ function buildAndApplyMenu(options: RegisterAppMenuOptions): void {
   }
 
   const featureTourItem: Electron.MenuItemConstructorOptions = {
-    label: translateMain('menu.exploreOrca', 'Explore Orca'),
+    label: translateMain('menu.exploreOrca', 'Explore Dark Factory'),
     click: (_menuItem, window) => onOpenFeatureTour(window)
   }
 
   const setupGuideItem: Electron.MenuItemConstructorOptions = {
-    label: translateMain('menu.gettingStarted', 'Getting Started with Orca'),
+    label: translateMain('menu.gettingStarted', 'Getting Started with Dark Factory'),
     click: (_menuItem, window) => onOpenSetupGuide(window)
   }
 
@@ -232,7 +232,7 @@ function buildAndApplyMenu(options: RegisterAppMenuOptions): void {
         click: () => onToggleAppearance('showAutomationsButton')
       },
       {
-        label: translateMain('menu.showMobileButton', 'Show Orca Mobile Button'),
+        label: translateMain('menu.showMobileButton', 'Show Dark Factory Mobile Button'),
         type: 'checkbox',
         checked: appearance.showMobileButton,
         click: () => onToggleAppearance('showMobileButton')

@@ -1517,9 +1517,9 @@ async function presentRendererRecoveryPrompt(recentRecoveryCount: number): Promi
     buttons: ['Reload', 'Quit'],
     defaultId: 0,
     cancelId: 1,
-    title: 'Orca keeps failing to load',
+    title: 'Dark Factory keeps failing to load',
     message: 'The app window crashed repeatedly and stopped reloading automatically.',
-    detail: `Orca tried to recover ${recentRecoveryCount} times in a row without success. This is often a graphics-driver or installation problem. Reload to try again, or quit and relaunch Orca.`
+    detail: `Dark Factory tried to recover ${recentRecoveryCount} times in a row without success. This is often a graphics-driver or installation problem. Reload to try again, or quit and relaunch Dark Factory.`
   }
   const { response } = window
     ? await dialog.showMessageBox(window, options)

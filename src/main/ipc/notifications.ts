@@ -119,8 +119,8 @@ function probeNotificationDelivery(): Promise<NotificationDeliveryProbeResult> {
   permissionDialogTriggeredThisSession = true
 
   const probe = new Notification({
-    title: 'Orca notifications are on',
-    body: 'Orca will alert you when agents finish or terminals need attention.',
+    title: 'Dark Factory notifications are on',
+    body: 'Dark Factory will alert you when agents finish or terminals need attention.',
     silent: true
   })
   activeNotifications.add(probe)
@@ -643,8 +643,8 @@ export function triggerStartupNotificationRegistration(store: Store): void {
   store.updateUI({ notificationPermissionRequested: true })
 
   const notification = new Notification({
-    title: 'Orca is ready to notify you',
-    body: 'Allow notifications so Orca can alert you when agents finish or terminals need attention.'
+    title: 'Dark Factory is ready to notify you',
+    body: 'Allow notifications so Dark Factory can alert you when agents finish or terminals need attention.'
   })
 
   // Why: prevent GC from collecting the notification and its click handler while it's still visible.

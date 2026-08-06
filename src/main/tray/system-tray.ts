@@ -20,7 +20,7 @@ export type SystemTrayOptions = {
   onOpenSettings: () => void
   /** Run the existing user-initiated update check. */
   onCheckForUpdates: () => void
-  /** Quit Orca for real (caller must set the quitting latch before quitting). */
+  /** Quit Dark Factory for real (caller must set the quitting latch before quitting). */
   onQuit: () => void
 }
 
@@ -47,9 +47,9 @@ let nativeThemeUpdatedListener: (() => void) | null = null
 // tooltip carries the worktree/branch label so hovering tells them apart.
 function baseTooltip(): string {
   if (!devIndicator) {
-    return 'Orca'
+    return 'Dark Factory'
   }
-  return devIndicator.label ? `Orca DEV (${devIndicator.label})` : 'Orca DEV'
+  return devIndicator.label ? `Dark Factory DEV (${devIndicator.label})` : 'Dark Factory DEV'
 }
 
 // Why: on Windows the notification area expects a 16px icon; the app icon PNG
