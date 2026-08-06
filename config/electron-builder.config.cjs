@@ -80,7 +80,13 @@ const winSpeechNativeResource = {
 /** @type {import('electron-builder').Configuration} */
 module.exports = {
   appId,
-  productName: 'Orca',
+  // Why: no space — many build/smoke/CI scripts treat this as a literal path
+  // token (dist/mac-arm64/${productName}.app, zip entries, etc.); a spaced
+  // name risks silent breakage anywhere that isn't shell-quoted. The on-screen
+  // brand name ('Dark Factory', with the space) lives separately in
+  // BASE_APP_NAME (src/main/startup/dev-instance-identity.ts), set at runtime
+  // via app.setName() and unrelated to this packaging identifier.
+  productName: 'DarkFactory',
   ...(devChannelBuildVersion
     ? { extraMetadata: { version: devChannelBuildVersion } }
     : localBuildVersion
