@@ -26,13 +26,18 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
-  readSync
+  readSync,
+  writeFileSync
 } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { RELAY_WINDOWS_PROCESS_TREE_FILENAME } from '../../src/shared/relay-artifacts.ts'
+import {
+  nodeGypRebuildInvocation,
+  stageWindowsProcessTreeNodeAddonApiHeaders,
+  WINDOWS_PROCESS_TREE_PACKAGE_DIR as PACKAGE_DIR
+} from './windows-process-tree-gyp-rebuild.mjs'
 
 const ROOT = resolve(import.meta.dirname, '..', '..')
-const PACKAGE_DIR = join(ROOT, 'node_modules', '@vscode', 'windows-process-tree')
 const SUPPORTED_ARCHES = ['x64', 'arm64']
 
 /** PE `IMAGE_FILE_HEADER.Machine` values, so a cross-build cannot silently emit host arch. */
@@ -53,10 +58,11 @@ function parseArgs(argv) {
 /**
  * Refuse to build unpatched source.
  *
- * Both hunks are load-bearing and fail in opposite directions: with Spectre the
- * build dies outright, and with the cap it succeeds and lies. Checking the
- * source rather than trusting the install is what stops a silently unpatched
- * tree from being shipped as if it were patched.
+ * Each hunk fails differently: Spectre dies outright, the 1024-process cap
+ * succeeds and lies, and `.targets` is cwd-relative so pnpm's nested layout
+ * makes node-gyp miss node_addon_api.gyp on Windows. Checking the source
+ * rather than trusting the install is what stops a silently unpatched tree
+ * from being shipped as if it were patched.
  */
 function assertPatchApplied() {
   const bindingGyp = readFileSync(join(PACKAGE_DIR, 'binding.gyp'), 'utf8')
@@ -66,12 +72,67 @@ function assertPatchApplied() {
         'config/patches/@vscode__windows-process-tree@0.8.0.patch; run pnpm install.'
     )
   }
+  if (bindingGyp.includes('node_addon_api.gyp')) {
+    throw new Error(
+      'binding.gyp still depends on node_addon_api.gyp. pnpm and node-gyp rewrite that ' +
+        'project path incorrectly on Windows. ' +
+        'pnpm did not apply config/patches/@vscode__windows-process-tree@0.8.0.patch; run pnpm install.'
+    )
+  }
+  if (!bindingGyp.includes('"include_dirs": ["deps/node-addon-api"]')) {
+    throw new Error('binding.gyp does not use the staged node-addon-api headers.')
+  }
   const processCc = readFileSync(join(PACKAGE_DIR, 'src', 'process.cc'), 'utf8')
   if (processCc.includes('process_count < 1024')) {
     throw new Error(
       'src/process.cc still caps enumeration at 1024 processes. pnpm did not apply ' +
         'config/patches/@vscode__windows-process-tree@0.8.0.patch; run pnpm install.'
     )
+  }
+}
+
+// pnpm can materialize this CRLF package without applying its patch. Repair the
+// load-bearing build settings before node-gyp so the release build stays safe.
+function applyWindowsProcessTreeBuildFixes() {
+  const bindingPath = join(PACKAGE_DIR, 'binding.gyp')
+  const processPath = join(PACKAGE_DIR, 'src', 'process.cc')
+  let bindingGyp = readFileSync(bindingPath, 'utf8')
+  let processCc = readFileSync(processPath, 'utf8')
+  const originalBinding = bindingGyp
+  const originalProcess = processCc
+
+  for (const dynamicDependency of [
+    String.raw`<!(node -p \"require('node-addon-api').targets\"):node_addon_api_except`,
+    String.raw`<!(node -p \"require.resolve('node-addon-api/node_addon_api.gyp')\"):node_addon_api_except`,
+    '../../node-addon-api/node_addon_api.gyp:node_addon_api_except'
+  ]) {
+    bindingGyp = bindingGyp.replace(`"${dynamicDependency}",`, '')
+  }
+  bindingGyp = bindingGyp.replace(
+    '"include_dirs": []',
+    '"include_dirs": ["deps/node-addon-api"],\n          "defines": ["NAPI_CPP_EXCEPTIONS", "_HAS_EXCEPTIONS=1"]'
+  )
+  if (!bindingGyp.includes('"ExceptionHandling": 1')) {
+    bindingGyp = bindingGyp.replace(
+      '"VCCLCompilerTool": {',
+      '"VCCLCompilerTool": {\n              "ExceptionHandling": 1,'
+    )
+  }
+  bindingGyp = bindingGyp.replace(
+    /\r?\n\s*"msvs_configuration_attributes": \{\s*"SpectreMitigation": "Spectre"\s*\},?/s,
+    ''
+  )
+  processCc = processCc.replace(/process_count < 1024 && /, '')
+
+  if (bindingGyp !== originalBinding) {
+    writeFileSync(bindingPath, bindingGyp)
+  }
+  if (processCc !== originalProcess) {
+    writeFileSync(processPath, processCc)
+  }
+  stageWindowsProcessTreeNodeAddonApiHeaders(PACKAGE_DIR)
+  if (bindingGyp !== originalBinding || processCc !== originalProcess) {
+    console.warn('[windows-process-tree] Repaired un-applied pnpm patch hunks before build.')
   }
 }
 
@@ -101,14 +162,12 @@ function main() {
   if (!existsSync(PACKAGE_DIR)) {
     throw new Error(`${PACKAGE_DIR} is missing. Run pnpm install first.`)
   }
+  applyWindowsProcessTreeBuildFixes()
   assertPatchApplied()
 
-  console.log(`[windows-process-tree] building ${arch} from ${PACKAGE_DIR}`)
-  execFileSync(
-    process.execPath,
-    [join(ROOT, 'node_modules', 'node-gyp', 'bin', 'node-gyp.js'), 'rebuild', `--arch=${arch}`],
-    { cwd: PACKAGE_DIR, stdio: 'inherit' }
-  )
+  const gyp = nodeGypRebuildInvocation(arch)
+  console.log(`[windows-process-tree] building ${arch} from ${gyp.cwd}`)
+  execFileSync(process.execPath, gyp.args, { cwd: gyp.cwd, stdio: 'inherit' })
 
   const built = join(PACKAGE_DIR, 'build', 'Release', 'windows_process_tree.node')
   if (!existsSync(built)) {
