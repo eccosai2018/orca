@@ -2,27 +2,25 @@ import React, { useCallback, useRef, useState } from 'react'
 import type { GitBranchChangeEntry } from '../../../../../../shared/git-diff-compare-types'
 import type { GitStatusEntry } from '../../../../../../shared/git-status-types'
 import type { DiffSection } from '../../diff-section-types'
-import {
-  createCombinedDiffSectionIndexMap,
-  type CombinedDiffFileTreeMode
-} from '../resolve-changes/combined-diff-section-identity'
+import type { CombinedDiffFileTreeMode } from '../resolve-changes/combined-diff-section-identity'
 import { handleCombinedDiffFileTreeNavigation } from './combined-diff-file-tree-navigation'
 import { isCombinedDiffSectionViewed } from './combined-diff-file-tree-filter'
 
 export type CombinedDiffTreeNavigation = {
   activeTreeSectionKey: string | null
   handleTreeNavigate: (entry: GitStatusEntry | GitBranchChangeEntry) => void
-  sectionIndexByKey: Map<string, number>
+  sectionIndexByKey: ReadonlyMap<string, number>
   sectionIndexByKeyRef: React.RefObject<ReadonlyMap<string, number>>
   viewedSectionKeys: Set<string>
 }
 
-// Why: navigation targets are passed in rather than imported so this stays a leaf of the tree folder.
+// Inject navigation targets to keep this module a leaf of the tree folder.
 export function useCombinedDiffTreeNavigation({
   ensureSectionLoaded,
   entrySignature,
   markDirectScrollInput,
   scrollToIndex,
+  sectionIndexByKey,
   sections,
   sectionsRef,
   toggleSection,
@@ -32,38 +30,13 @@ export function useCombinedDiffTreeNavigation({
   entrySignature: string
   markDirectScrollInput: () => void
   scrollToIndex: (index: number) => void
+  // Share one identity-stable map with the viewer’s scroll anchor.
+  sectionIndexByKey: ReadonlyMap<string, number>
   sections: DiffSection[]
   sectionsRef: React.RefObject<DiffSection[]>
   toggleSection: (index: number) => void
   treeMode: CombinedDiffFileTreeMode
 }): CombinedDiffTreeNavigation {
-  const sectionIndexCacheRef = useRef<{
-    entrySignature: string
-    sectionCount: number
-    map: Map<string, number>
-    keys: string[]
-  } | null>(null)
-  const sectionIndexByKey = React.useMemo(() => {
-    const previous = sectionIndexCacheRef.current
-    // Section content/loading updates preserve entry order and keys. The entry signature and
-    // count usually change when the navigable structure changes, but compare keys as a guard for
-    // same-sized/reused signatures (and to keep this cache correct if a caller rebuilds sections).
-    if (
-      previous?.entrySignature === entrySignature &&
-      previous.sectionCount === sections.length &&
-      sections.every((section, index) => previous.keys[index] === section.key)
-    ) {
-      return previous.map
-    }
-    const map = createCombinedDiffSectionIndexMap(sections)
-    sectionIndexCacheRef.current = {
-      entrySignature,
-      sectionCount: sections.length,
-      map,
-      keys: sections.map((section) => section.key)
-    }
-    return map
-  }, [entrySignature, sections])
   const sectionIndexByKeyRef = useRef<ReadonlyMap<string, number>>(sectionIndexByKey)
   sectionIndexByKeyRef.current = sectionIndexByKey
 
@@ -74,7 +47,7 @@ export function useCombinedDiffTreeNavigation({
   const activeTreeSectionKey =
     activeTreeSectionState.entrySignature === entrySignature ? activeTreeSectionState.key : null
   if (activeTreeSectionState.entrySignature !== entrySignature) {
-    // Why: the tree highlight belongs to one entry set; reset now so it can't flash on another before an Effect would.
+    // Reset before paint so another entry set cannot inherit a stale highlight.
     setActiveTreeSectionState({ entrySignature, key: null })
   }
   const viewedSectionCacheRef = useRef<{
@@ -109,7 +82,11 @@ export function useCombinedDiffTreeNavigation({
       if (!previousSection || !section) {
         continue
       }
-      // Why: reordered keys can't be patched index by index — a later delete would drop an earlier add.
+      // Loads replace only their own section; identical row objects need no viewed-state derivation.
+      if (previousSection === section) {
+        continue
+      }
+      // Reordered keys require full recomputation or a later delete could erase an earlier addition.
       if (previousSection.key !== section.key) {
         return recomputeAllViewedKeys()
       }

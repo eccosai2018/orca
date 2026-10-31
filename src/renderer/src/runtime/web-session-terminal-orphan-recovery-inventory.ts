@@ -14,10 +14,12 @@ import {
 import {
   hasExactTerminalRetirementProof,
   hasStrongOrphanIdentity,
+  withoutHostAttestation,
   type RecoveryDisposition,
   type RecoverySurface
 } from './web-session-terminal-orphan-recovery-surface'
 import { runInTerminalRecoveryRpcLane } from './web-session-terminal-orphan-recovery-rpc-lane'
+import { hostScopeCensusIsComplete } from '../../../shared/runtime-listing-host-scope'
 
 type RuntimeCall = (args: {
   selector: string
@@ -40,7 +42,7 @@ function fallback(
   removed: ReadonlySet<string>
 ): TerminalOrphanInventoryResolution {
   return {
-    retained: [...retainedBeforeListing, ...inventorySurfaces],
+    retained: [...retainedBeforeListing, ...inventorySurfaces.map(withoutHostAttestation)],
     removed: new Set(removed),
     claims: [],
     topologyRevision: 0
@@ -103,7 +105,7 @@ export async function resolveTerminalOrphanInventory(args: {
   const retainedBeforeListing = [...duplicateSurfaces, ...stableRetained]
   if (inventorySurfaces.length > 64) {
     return {
-      retained: [...retainedBeforeListing, ...inventorySurfaces],
+      retained: [...retainedBeforeListing, ...inventorySurfaces.map(withoutHostAttestation)],
       removed: provenRemoved,
       claims: [],
       topologyRevision: 0
@@ -163,9 +165,8 @@ export async function resolveTerminalOrphanInventory(args: {
       listedByHandle.set(terminal.handle, terminal)
     }
   }
-  // Older hosts omit hostScope entirely; an unscoped absence cannot prove a PTY exited.
-  const hostScopeUnverifiable =
-    listed.hostScope === undefined || listed.hostScope.omittedHostIds.length > 0
+  // Old hosts omit hostScope, so absence proves no exit. omittedHostIds peers disclose scope without making this host incomplete (#18595).
+  const hostScopeUnverifiable = !hostScopeCensusIsComplete(listed.hostScope)
   const dispositions = new Map<string, RecoveryDisposition>()
   const claims: RuntimeTerminalOrphanAdoptionClaim[] = []
   for (const surface of inventorySurfaces) {
@@ -202,7 +203,8 @@ export async function resolveTerminalOrphanInventory(args: {
     ) {
       disposition = 'retain'
     } else if (surface.pending && terminal.ptyId !== surface.expectedPtyId) {
-      disposition = 'remove'
+      // Fresh liveness attests this handle under a replacement PTY: rebind, never retire on ID rotation (#11495). Handle is identity; removal still requires explicit retiredTerminalSurfaces or two authoritative absences (docs/reference/ssh-execution-boundary.md).
+      disposition = 'retain'
     } else if (!hasStrongOrphanIdentity(terminal, surface, snapshot.worktree)) {
       disposition = 'retain'
     } else {
@@ -229,9 +231,11 @@ export async function resolveTerminalOrphanInventory(args: {
     }
     dispositions.set(surface.surfaceKey, disposition)
   }
-  const retainedAfterListing = inventorySurfaces.filter(
-    (surface) => dispositions.get(surface.surfaceKey) === 'retain'
-  )
+  const retainedAfterListing = inventorySurfaces
+    .filter((surface) => dispositions.get(surface.surfaceKey) === 'retain')
+    .map((surface) =>
+      listedByHandle.has(surface.handle) ? surface : withoutHostAttestation(surface)
+    )
   const removed = new Set(
     [
       ...retiredSurfaces,

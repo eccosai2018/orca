@@ -6,14 +6,22 @@ import type {
 } from '../../../../shared/automations-types'
 import type { OrcaHooks } from '../../../../shared/orca-yaml-hook-types'
 import { useContextualTour } from '@/components/contextual-tours/use-contextual-tour'
-import type { AutomationCreateTarget, AutomationDraft } from './AutomationEditorDialog'
+import type { AutomationDraft } from './AutomationEditorDialog'
 import { AUTOMATION_DEFAULT_TIME } from './automation-draft-model'
 import type { AutomationActionNotice } from './automation-row-action-dispatch'
 import type { AutomationHostCatalogEntry } from './automation-host-catalog-types'
 import type { AutomationCreateDestination } from './automation-create-destination'
 import type { AutomationListRow } from './automation-list-row-identity'
-import { EMPTY_AUTOMATION_LIST_FILTER, type AutomationListFilter } from './automation-list-view'
-import type { AutomationPaneTab, SelectedExternalRunPage } from './automation-page-state'
+import {
+  EMPTY_AUTOMATION_LIST_FILTER,
+  type AutomationListFilter,
+  type AutomationListSort
+} from './automation-list-view'
+import type {
+  AutomationPaneTab,
+  AutomationRunPageOrigin,
+  AutomationsPageView
+} from './automation-page-state'
 import type { ExternalAutomationScope } from './external-automation-scope-client'
 import type { SelectedAutomationRunHistoryOutcome } from './use-selected-automation-run-history'
 import type { AutomationsPageStoreState } from './use-automations-page-store-state'
@@ -28,10 +36,14 @@ export function useAutomationsPageLocalState(store: AutomationsPageStoreState) {
       automationId: null,
       rowKey: null,
       ownerKey: null,
+      authority: null,
+      navigation: null,
+      reloadToken: -1,
       runs: [],
       notice: null
     })
   const [runHistoryReloadToken, setRunHistoryReloadToken] = useState(0)
+  const [runHistoryAcquisitionToken, setRunHistoryAcquisitionToken] = useState(0)
   const [failedAuthorityKeys, setFailedAuthorityKeys] = useState<ReadonlySet<string>>(
     () => new Set()
   )
@@ -49,8 +61,8 @@ export function useAutomationsPageLocalState(store: AutomationsPageStoreState) {
   const [isSaving, setIsSaving] = useState(false)
   const [listSearchQuery, setListSearchQuery] = useState('')
   const [listFilter, setListFilter] = useState<AutomationListFilter>(EMPTY_AUTOMATION_LIST_FILTER)
+  const [listSort, setListSort] = useState<AutomationListSort | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
-  const [createTarget, setCreateTarget] = useState<AutomationCreateTarget>('orca')
   const [editingAutomationId, setEditingAutomationId] = useState<string | null>(null)
   const [editingRowKey, setEditingRowKey] = useState<string | null>(null)
   const [editingDestination, setEditingDestination] = useState<{
@@ -60,14 +72,14 @@ export function useAutomationsPageLocalState(store: AutomationsPageStoreState) {
   const [editingHostStableKey, setEditingHostStableKey] = useState<string | null>(null)
   const moveCreationKeysRef = useRef(new Map<string, string>())
   const [relativeNow, setRelativeNow] = useState(() => Date.now())
+  const [pageView, setPageView] = useState<AutomationsPageView>('automations')
+  const [runPageOrigin, setRunPageOrigin] = useState<AutomationRunPageOrigin>('runs')
   const [activePaneTab, setActivePaneTab] = useState<AutomationPaneTab>('overview')
   const [selectedAutomationRunPageId, setSelectedAutomationRunPageId] = useState<string | null>(
     null
   )
   const [selectedRowKey, setSelectedRowKey] = useState<string | null>(null)
   const [selectedExternalKey, setSelectedExternalKey] = useState<string | null>(null)
-  const [selectedExternalRunPage, setSelectedExternalRunPage] =
-    useState<SelectedExternalRunPage | null>(null)
   const [isDetailOpen, setIsDetailOpen] = useState(false)
   const selectedExternalKeyRef = useRef<string | null>(null)
   useEffect(() => {
@@ -76,6 +88,7 @@ export function useAutomationsPageLocalState(store: AutomationsPageStoreState) {
 
   const selectAutomationId = useCallback(
     (automationId: string | null): void => {
+      setRunHistoryAcquisitionToken((token) => token + 1)
       setSelectedAutomationRunPageId(null)
       setSelectedRowKey(null)
       setSelectedId(automationId)
@@ -83,9 +96,9 @@ export function useAutomationsPageLocalState(store: AutomationsPageStoreState) {
     [setSelectedId]
   )
   const selectExternalKey = useCallback((externalKey: string | null): void => {
-    setSelectedExternalRunPage(null)
     setSelectedExternalKey(externalKey)
   }, [])
+  const [targetEdited, setTargetEdited] = useState(false)
   const [draftAtOpen, setDraftAtOpen] = useState<AutomationDraft | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<AutomationListRow | null>(null)
   const [externalDeleteTarget, setExternalDeleteTarget] = useState<{
@@ -98,11 +111,6 @@ export function useAutomationsPageLocalState(store: AutomationsPageStoreState) {
     !isLoading && !createOpen && !deleteTarget && !externalDeleteTarget,
     'automations_open'
   )
-  const [editingExternalTarget, setEditingExternalTarget] = useState<{
-    manager: ExternalAutomationManager
-    job: ExternalAutomationJob
-    scope: ExternalAutomationScope
-  } | null>(null)
   const [dontAskDeleteAgain, setDontAskDeleteAgain] = useState(false)
   const editRequestRef = useRef(0)
   const deleteConfirmButtonRef = useRef<HTMLButtonElement>(null)
@@ -122,6 +130,7 @@ export function useAutomationsPageLocalState(store: AutomationsPageStoreState) {
     name: '',
     prompt: '',
     agentId: defaultAgent,
+    extraAgentArgs: '',
     projectId: '',
     workspaceMode: 'existing',
     workspaceId: '',
@@ -135,6 +144,7 @@ export function useAutomationsPageLocalState(store: AutomationsPageStoreState) {
     dayOfWeek: '1',
     customSchedule: '',
     missedRunGraceMinutes: '720',
+    savedSchedule: null,
     scheduleWarning: null
   })
   const draftRef = useRef(draft)
@@ -148,6 +158,8 @@ export function useAutomationsPageLocalState(store: AutomationsPageStoreState) {
     automationHostTargetKey,
     setAutomationHostTargetKey,
     selectedAutomationRuns,
+    runHistoryAcquisitionToken,
+    setRunHistoryAcquisitionToken,
     setSelectedAutomationRuns,
     runHistoryReloadToken,
     setRunHistoryReloadToken,
@@ -171,10 +183,10 @@ export function useAutomationsPageLocalState(store: AutomationsPageStoreState) {
     setListSearchQuery,
     listFilter,
     setListFilter,
+    listSort,
+    setListSort,
     createOpen,
     setCreateOpen,
-    createTarget,
-    setCreateTarget,
     editingAutomationId,
     setEditingAutomationId,
     editingRowKey,
@@ -186,6 +198,10 @@ export function useAutomationsPageLocalState(store: AutomationsPageStoreState) {
     moveCreationKeysRef,
     relativeNow,
     setRelativeNow,
+    pageView,
+    setPageView,
+    runPageOrigin,
+    setRunPageOrigin,
     activePaneTab,
     setActivePaneTab,
     selectedAutomationRunPageId,
@@ -194,21 +210,19 @@ export function useAutomationsPageLocalState(store: AutomationsPageStoreState) {
     setSelectedRowKey,
     selectedExternalKey,
     setSelectedExternalKey,
-    selectedExternalRunPage,
-    setSelectedExternalRunPage,
     isDetailOpen,
     setIsDetailOpen,
     selectedExternalKeyRef,
     selectAutomationId,
     selectExternalKey,
+    targetEdited,
+    setTargetEdited,
     draftAtOpen,
     setDraftAtOpen,
     deleteTarget,
     setDeleteTarget,
     externalDeleteTarget,
     setExternalDeleteTarget,
-    editingExternalTarget,
-    setEditingExternalTarget,
     dontAskDeleteAgain,
     setDontAskDeleteAgain,
     editRequestRef,

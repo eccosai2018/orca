@@ -1,3 +1,10 @@
+import {
+  makeRuntimeOrchestrationDb,
+  dispatchContextRow,
+  taskLineageRow,
+  runRow,
+  coordinatorRunRow
+} from '../runtime-orchestration-db.test-fixture'
 import { describe, expect, it, vi } from 'vitest'
 import {
   AGENT_STATUS_STALE_AFTER_MS,
@@ -95,7 +102,10 @@ describe('OrcaRuntimeService', () => {
           return [name, createRootDispatch(db, task.id, handles[name], paneKey(name))]
         })
       )
-      const legacyTask = db.createTask({ spec: 'legacy worker' })
+      const legacyTask = db.createTask({
+        runId: 'run_legacy_local',
+        spec: 'legacy worker'
+      })
       const legacyDispatch = createRootDispatch(
         db,
         legacyTask.id,
@@ -300,8 +310,13 @@ describe('OrcaRuntimeService', () => {
         orchestrationRunId: runA.id
       })
 
-      db.createRun({
+      const runC = db.createRun({
         objective: 'rebind the original coordinator pane',
+        coordinatorHandle: handles.coordinator,
+        coordinatorPaneKey: paneKey('coordinator')
+      })
+      db.bindRun({
+        runId: runC.id,
         coordinatorHandle: handles.coordinator,
         coordinatorPaneKey: paneKey('coordinator')
       })
@@ -320,7 +335,11 @@ describe('OrcaRuntimeService', () => {
         dispatchStatus: 'dispatched',
         taskTitle: 'coordinator-created work',
         displayName: 'coordinator-created work',
-        orchestrationRunId: runA.id
+        orchestrationRunId: runA.id,
+        attention: {
+          categories: ['unverifiable'],
+          requiresAction: true
+        }
       })
     } finally {
       db.close()
@@ -355,6 +374,7 @@ describe('OrcaRuntimeService', () => {
       const getTask = vi.spyOn(db, 'getTask')
       const getRun = vi.spyOn(db, 'getRun')
       const getActiveCoordinatorRun = vi.spyOn(db, 'getActiveCoordinatorRun')
+      const getWorkerAttentionFacts = vi.spyOn(db, 'getWorkerAttentionFacts')
       runtime.setOrchestrationDb(db)
       runtime.attachWindow(1)
 
@@ -382,7 +402,8 @@ describe('OrcaRuntimeService', () => {
         latestDispatch: getLatestDispatchForTerminal.mock.calls.length,
         task: getTask.mock.calls.length,
         run: getRun.mock.calls.length,
-        legacyCoordinator: getActiveCoordinatorRun.mock.calls.length
+        legacyCoordinator: getActiveCoordinatorRun.mock.calls.length,
+        attention: getWorkerAttentionFacts.mock.calls.length
       }
 
       db.completeDispatch(dispatch.id)
@@ -393,7 +414,8 @@ describe('OrcaRuntimeService', () => {
         getLatestDispatchForTerminal,
         getTask,
         getRun,
-        getActiveCoordinatorRun
+        getActiveCoordinatorRun,
+        getWorkerAttentionFacts
       ]) {
         query.mockClear()
       }
@@ -404,7 +426,8 @@ describe('OrcaRuntimeService', () => {
         latestDispatch: getLatestDispatchForTerminal.mock.calls.length,
         task: getTask.mock.calls.length,
         run: getRun.mock.calls.length,
-        legacyCoordinator: getActiveCoordinatorRun.mock.calls.length
+        legacyCoordinator: getActiveCoordinatorRun.mock.calls.length,
+        attention: getWorkerAttentionFacts.mock.calls.length
       }
       expect({
         active: {
@@ -422,6 +445,7 @@ describe('OrcaRuntimeService', () => {
           task: 1,
           run: 1,
           legacyCoordinator: 0,
+          attention: 0,
           total: 201
         },
         historical: {
@@ -430,6 +454,7 @@ describe('OrcaRuntimeService', () => {
           task: 0,
           run: 0,
           legacyCoordinator: 0,
+          attention: 0,
           total: 200
         }
       })
@@ -447,31 +472,40 @@ describe('OrcaRuntimeService', () => {
     const coordinatorPaneKey = makePaneKey('tab-coordinator', coordinatorLeafId)
     const workerHandle = runtime.preAllocateHandleForPty('pty-worker')
     const coordinatorHandle = runtime.preAllocateHandleForPty('pty-coordinator')
-    runtime.setOrchestrationDb({
-      getActiveDispatchForTerminal: vi.fn(() => undefined),
-      getLatestDispatchForTerminal: vi.fn((handle: string) =>
+    const orchestrationDb = makeRuntimeOrchestrationDb()
+    vi.spyOn(orchestrationDb, 'listSessionDispatchesForPresentation').mockImplementation(() => [])
+    vi.spyOn(orchestrationDb, 'getActiveDispatchForTerminal').mockImplementation(() => undefined)
+    vi.spyOn(orchestrationDb, 'getLatestDispatchForTerminal').mockImplementation(
+      (handle: string) =>
         handle === workerHandle
-          ? {
+          ? dispatchContextRow({
               id: 'ctx-done',
               run_id: 'run-1',
               task_id: 'task-done',
               assignee_handle: workerHandle,
               status: 'completed',
               completed_at: new Date(Date.now()).toISOString()
-            }
+            })
           : undefined
-      ),
-      getTask: vi.fn(() => ({
+    )
+    vi.spyOn(orchestrationDb, 'getTask').mockImplementation(() =>
+      taskLineageRow({
         id: 'task-done',
         run_id: 'run-1',
         created_by_terminal_handle: coordinatorHandle
-      })),
-      getRun: vi.fn(() => ({
+      })
+    )
+    vi.spyOn(orchestrationDb, 'getRun').mockImplementation(() =>
+      runRow({
         id: 'run-1',
         coordinator_handle: coordinatorHandle,
+        coordinator_orca_session_id: null,
+        coordinator_orca_session_id_generation: null,
+        consumer_generation: 0,
         legacy: 0
-      }))
-    } as never)
+      })
+    )
+    runtime.setOrchestrationDb(orchestrationDb)
     runtime.attachWindow(1)
 
     const result = runtime.syncWindowGraph(1, {
@@ -525,27 +559,33 @@ describe('OrcaRuntimeService', () => {
     const workerLeafId = '55555555-5555-4555-8555-555555555555'
     const workerPaneKey = makePaneKey('tab-worker', workerLeafId)
     const workerHandle = runtime.preAllocateHandleForPty('pty-worker')
-    runtime.setOrchestrationDb({
-      getActiveDispatchForTerminal: vi.fn(() => undefined),
-      getLatestDispatchForTerminal: vi.fn((handle: string) =>
+    const orchestrationDb = makeRuntimeOrchestrationDb()
+    vi.spyOn(orchestrationDb, 'listSessionDispatchesForPresentation').mockImplementation(() => [])
+    vi.spyOn(orchestrationDb, 'getActiveDispatchForTerminal').mockImplementation(() => undefined)
+    vi.spyOn(orchestrationDb, 'getLatestDispatchForTerminal').mockImplementation(
+      (handle: string) =>
         handle === workerHandle
-          ? {
+          ? dispatchContextRow({
               id: 'ctx-done',
               task_id: 'task-done',
               assignee_handle: workerHandle,
               status: 'completed',
               completed_at: new Date(Date.now()).toISOString()
-            }
+            })
           : undefined
-      ),
-      getTask: vi.fn(() => ({
+    )
+    vi.spyOn(orchestrationDb, 'getTask').mockImplementation(() =>
+      taskLineageRow({
         id: 'task-done'
-      })),
-      getActiveCoordinatorRun: vi.fn(() => ({
+      })
+    )
+    vi.spyOn(orchestrationDb, 'getActiveCoordinatorRun').mockImplementation(() =>
+      coordinatorRunRow({
         id: 'run-unrelated',
         coordinator_handle: 'term_unrelated'
-      }))
-    } as never)
+      })
+    )
+    runtime.setOrchestrationDb(orchestrationDb)
     runtime.attachWindow(1)
 
     const result = runtime.syncWindowGraph(1, {

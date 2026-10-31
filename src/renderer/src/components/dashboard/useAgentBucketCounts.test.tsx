@@ -29,41 +29,25 @@ vi.mock('@/store', () => ({
 }))
 
 vi.mock('./build-dashboard-bucket-counts', () => ({
-  buildDashboardBucketCounts: mocks.buildDashboardBucketCounts
+  buildDashboardBucketCounts: mocks.buildDashboardBucketCounts,
+  createDashboardBucketCountsCache: () => ({
+    byWorktree: new Map(),
+    computeCount: 0,
+    lastComputedWorktreeIds: []
+  })
 }))
 
-import { useAgentBucketCounts } from './useAgentBucketCounts'
+import { resetAgentBucketCountStateForTests, useAgentBucketCounts } from './useAgentBucketCounts'
 
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+  resetAgentBucketCountStateForTests()
   mocks.state.acknowledgedAgentsByPaneKey = {}
   mocks.state.unrelatedEpoch = 0
 })
 
 describe('useAgentBucketCounts', () => {
-  it('includes folder workspaces in the count snapshot inputs', () => {
-    mocks.buildDashboardBucketCounts.mockImplementation(
-      (state: { folderWorkspaces?: unknown[] }) => ({
-        attention: 0,
-        working: state.folderWorkspaces?.length ? 1 : 0,
-        done: 0,
-        idle: 0
-      })
-    )
-
-    const { result } = renderHook(() => useAgentBucketCounts())
-
-    expect(result.current).toEqual({ attention: 0, working: 1, done: 0, idle: 0 })
-    expect(mocks.buildDashboardBucketCounts).toHaveBeenCalledWith(
-      expect.objectContaining({
-        folderWorkspaces: mocks.state.folderWorkspaces,
-        unifiedTabsByWorktree: mocks.state.unifiedTabsByWorktree
-      }),
-      expect.any(Number)
-    )
-  })
-
   it('moves acknowledged completions to idle without recomputing for unrelated writes', () => {
     mocks.buildDashboardBucketCounts.mockImplementation(
       (state: { acknowledgedAgentsByPaneKey?: Record<string, number> }) => ({

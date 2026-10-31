@@ -16,31 +16,8 @@ export function hasModifier(
   return Boolean(input.shift ?? input.shiftKey)
 }
 
-function isFunctionKeyToken(key: string): boolean {
-  return /^F([1-9]|1[0-9]|2[0-4])$/.test(key)
-}
-
-export function normalizeKeyToken(token: string): string | null {
-  if (token === ' ') {
-    return 'Space'
-  }
-  const trimmed = token.trim()
-  if (!trimmed) {
-    return null
-  }
-  const upper = trimmed.toUpperCase()
-  if (upper.length === 1 && upper >= 'A' && upper <= 'Z') {
-    return upper
-  }
-  if (upper.length === 1 && upper >= '0' && upper <= '9') {
-    return upper
-  }
-  // Function keys F1–F24 (event.key/event.code report them verbatim, e.g. F7).
-  if (isFunctionKeyToken(upper)) {
-    return upper
-  }
-
-  const simple: Record<string, string> = {
+const SIMPLE_KEY_TOKENS = new Map<string, string>(
+  Object.entries({
     '[': 'BracketLeft',
     ']': 'BracketRight',
     '{': 'BracketLeft',
@@ -97,9 +74,34 @@ export function normalizeKeyToken(token: string): string | null {
     SEMICOLON: 'Semicolon',
     QUOTE: 'Quote',
     BACKQUOTE: 'Backquote'
+  })
+)
+
+function isFunctionKeyToken(key: string): boolean {
+  return /^F([1-9]|1[0-9]|2[0-4])$/.test(key)
+}
+
+export function normalizeKeyToken(token: string): string | null {
+  if (token === ' ') {
+    return 'Space'
+  }
+  const trimmed = token.trim()
+  if (!trimmed) {
+    return null
+  }
+  const upper = trimmed.toUpperCase()
+  if (upper.length === 1 && upper >= 'A' && upper <= 'Z') {
+    return upper
+  }
+  if (upper.length === 1 && upper >= '0' && upper <= '9') {
+    return upper
+  }
+  // Function keys F1–F24 (event.key/event.code report them verbatim, e.g. F7).
+  if (isFunctionKeyToken(upper)) {
+    return upper
   }
 
-  return simple[upper] ?? null
+  return SIMPLE_KEY_TOKENS.get(upper) ?? null
 }
 
 export function parseModifierToken(rawPart: string): ModifierToken | null {
@@ -140,7 +142,7 @@ export function emptyParsedKeybinding(): ParsedKeybinding {
   return { mod: false, meta: false, control: false, alt: false, shift: false, key: '' }
 }
 
-// Why: a double-tap is a bare modifier with no key, so it can't use the normal parse path; modifier validation is deferred to normalize.
+// Double-tap has no key, so use a separate parse path and defer modifier validation to normalize.
 export function parseDoubleTapKeybinding(rawParts: string[]): ParsedKeybinding | null {
   const modifiers: ModifierToken[] = []
   let sawDoubleTap = false
@@ -165,7 +167,7 @@ export function parseDoubleTapKeybinding(rawParts: string[]): ParsedKeybinding |
   for (const modifier of modifiers) {
     applyModifierToken(parsed, modifier)
   }
-  // Keep both flags when Mod is combined with a platform modifier, so normalize emits the shared "Mod or platform-specific, not both" error.
+  // Retain conflicting flags so normalize can report the shared Mod/platform-specific error.
   if (parsed.mod && (parsed.meta || parsed.control)) {
     parsed.doubleTapModifier = 'Mod'
     return parsed
@@ -177,7 +179,24 @@ export function parseDoubleTapKeybinding(rawParts: string[]): ParsedKeybinding |
   return parsed
 }
 
+// Definitions/user overrides form a small live set; cap retention for arbitrary caller-fed strings.
+const PARSE_CACHE_LIMIT = 512
+const parseCache = new Map<string, ParsedKeybinding | null>()
+
 export function parseKeybinding(binding: string): ParsedKeybinding | null {
+  if (parseCache.has(binding)) {
+    return parseCache.get(binding) ?? null
+  }
+  const parsed = parseKeybindingUncached(binding)
+  if (parseCache.size >= PARSE_CACHE_LIMIT) {
+    parseCache.clear()
+  }
+  // Freeze shared entries against caller mutation; callers copy before edits.
+  parseCache.set(binding, parsed ? Object.freeze(parsed) : null)
+  return parsed
+}
+
+function parseKeybindingUncached(binding: string): ParsedKeybinding | null {
   const rawParts = binding
     .split('+')
     .map((part) => part.trim())

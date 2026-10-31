@@ -1,4 +1,6 @@
 import { containsTerminalVerticalLineControl } from './terminal-ansi-normalization'
+import { ownRetainedString } from '../../shared/own-retained-string'
+import { carryTerminalTailSentinelMatches } from './terminal-tail-sentinel-index'
 import {
   applyTerminalLineControls,
   processTerminalTailCompleteSegments,
@@ -6,10 +8,116 @@ import {
   trimTerminalLineRight
 } from './terminal-tail-line-controls'
 import { MAX_TAIL_CHARS, MAX_TAIL_LINES, MAX_TAIL_PARTIAL_CHARS } from './terminal-tail-limits'
+import { maxUpwardCursorReach } from './terminal-tail-redraw-reach'
 import {
   appendNormalizedToMultilineTailBufferUnwindowed,
   type RetainedTailRedrawCursor
 } from './terminal-tail-redraw-buffer'
+
+type RetainedTailLineStats = {
+  totalChars: number
+  /** Whether every line is already right-trimmed, so the redraw prefix trim is a no-op. */
+  rightTrimmed: boolean
+}
+
+// Append replaces arrays; weak array keys let stats die with each tail while avoiding a full character re-sum per chunk.
+const tailLineStatsByLines = new WeakMap<readonly string[], RetainedTailLineStats>()
+
+function getRetainedTailLineStats(lines: readonly string[]): RetainedTailLineStats {
+  const cached = tailLineStatsByLines.get(lines)
+  if (cached) {
+    return cached
+  }
+  let totalChars = 0
+  let rightTrimmed = true
+  for (const line of lines) {
+    totalChars += line.length
+    if (rightTrimmed && trimTerminalLineRight(line) !== line) {
+      rightTrimmed = false
+    }
+  }
+  const stats = { totalChars, rightTrimmed }
+  tailLineStatsByLines.set(lines, stats)
+  return stats
+}
+
+type CarriedTailBuild = {
+  lines: string[]
+  /** Whether a retention cap dropped a row. */
+  truncated: boolean
+}
+
+/** Derive array, character total and sentinel carry window from the same capped keep bounds; callers must right-trim appended rows. */
+function buildCarriedTailLines(
+  previousLines: string[],
+  keepStart: number,
+  keepEnd: number,
+  appended: readonly string[],
+  charCapPartialChars: number | null
+): CarriedTailBuild {
+  const keptCount = keepEnd > keepStart ? keepEnd - keepStart : 0
+  let totalChars = 0
+  let carriedRightTrimmed = true
+  if (keptCount > 0) {
+    const previousStats = getRetainedTailLineStats(previousLines)
+    totalChars = previousStats.totalChars
+    carriedRightTrimmed = previousStats.rightTrimmed
+    for (let index = 0; index < keepStart; index += 1) {
+      totalChars -= previousLines[index]!.length
+    }
+    for (let index = keepEnd; index < previousLines.length; index += 1) {
+      totalChars -= previousLines[index]!.length
+    }
+  }
+  for (const line of appended) {
+    totalChars += line.length
+  }
+
+  // Both caps only ever drop from the front, so resolve them against the virtual concatenation
+  // before the array exists; the surviving keep bounds then define the carried window exactly.
+  const combinedLength = keptCount + appended.length
+  let dropCount = combinedLength > MAX_TAIL_LINES ? combinedLength - MAX_TAIL_LINES : 0
+  for (let index = 0; index < dropCount; index += 1) {
+    totalChars -= (
+      index < keptCount ? previousLines[keepStart + index]! : appended[index - keptCount]!
+    ).length
+  }
+  if (charCapPartialChars !== null) {
+    const charBudget = MAX_TAIL_CHARS - charCapPartialChars
+    while (dropCount < combinedLength && totalChars > charBudget) {
+      totalChars -= (
+        dropCount < keptCount
+          ? previousLines[keepStart + dropCount]!
+          : appended[dropCount - keptCount]!
+      ).length
+      dropCount += 1
+    }
+  }
+
+  if (
+    dropCount === 0 &&
+    appended.length === 0 &&
+    keepStart === 0 &&
+    keepEnd === previousLines.length
+  ) {
+    return { lines: previousLines, truncated: false }
+  }
+
+  const droppedFromCarried = dropCount < keptCount ? dropCount : keptCount
+  const carriedSourceStart = keepStart + droppedFromCarried
+  const carriedCount = keptCount - droppedFromCarried
+  const lines = previousLines.slice(carriedSourceStart, keepEnd)
+  for (let index = dropCount - droppedFromCarried; index < appended.length; index += 1) {
+    lines.push(appended[index]!)
+  }
+
+  tailLineStatsByLines.set(lines, {
+    totalChars,
+    rightTrimmed: carriedCount === 0 || carriedRightTrimmed
+  })
+  carryTerminalTailSentinelMatches(previousLines, lines, carriedSourceStart, carriedCount)
+  return { lines, truncated: dropCount > 0 }
+}
 
 export function appendNormalizedToTailBuffer(
   previousLines: string[],
@@ -52,42 +160,37 @@ export function appendNormalizedToTailBuffer(
   // Why: status UIs redraw one line via CR/backspace/erase; retain the latest redraw segment instead of appending every spinner frame.
   const segments = splitRetainedTerminalTailSegments(combinedChunk)
   const pieces = processTerminalTailCompleteSegments(segments.completeSegments)
-  const newlyCompletedLines = pieces.map((line) => trimTerminalLineRight(line))
+  const newlyCompletedLines: string[] = []
+  for (const piece of pieces) {
+    // Why own: every retained row is sliced from this chunk but outlives it by up to
+    // MAX_TAIL_LINES chunks, so an un-owned row pins its whole 64 KiB chunk.
+    newlyCompletedLines.push(ownRetainedString(trimTerminalLineRight(piece)))
+  }
   const partialResult = applyTerminalLineControls(segments.partialSegment)
   const nextPartialLine = trimTerminalLineRight(partialResult.text)
-  const retainedPartialLine = nextPartialLine.slice(-MAX_TAIL_PARTIAL_CHARS)
+  const retainedPartialLine = ownRetainedString(nextPartialLine.slice(-MAX_TAIL_PARTIAL_CHARS))
   const newCompleteLines = segments.completeLineCount
   const omittedNewCompleteLines = newCompleteLines - pieces.length
-  let nextLines =
-    newCompleteLines > 0
-      ? [...(omittedNewCompleteLines > 0 ? [] : previousLines), ...newlyCompletedLines]
-      : previousLines
-  let truncated =
+
+  // The plain path only ever appends, so the whole previous tail carries unless it was discarded.
+  const carriesPreviousLines = newCompleteLines === 0 || omittedNewCompleteLines === 0
+  const built = buildCarriedTailLines(
+    previousLines,
+    carriesPreviousLines ? 0 : previousLines.length,
+    previousLines.length,
+    newlyCompletedLines,
+    // Why gated: a chunk that neither completes a line nor grows the partial cannot breach the
+    // character cap, and re-checking it would evict on a tail that has not changed size.
+    newCompleteLines > 0 || retainedPartialLine.length > previousPartialLine.length
+      ? retainedPartialLine.length
+      : null
+  )
+  const nextLines = built.lines
+  const truncated =
     previousPartialWasCapped ||
     omittedNewCompleteLines > 0 ||
-    nextPartialLine.length > MAX_TAIL_PARTIAL_CHARS
-
-  if (nextLines.length > MAX_TAIL_LINES) {
-    nextLines = nextLines.slice(nextLines.length - MAX_TAIL_LINES)
-    truncated = true
-  }
-
-  if (newCompleteLines > 0 || retainedPartialLine.length > previousPartialLine.length) {
-    if (nextLines === previousLines) {
-      nextLines = [...previousLines]
-    }
-    let totalChars =
-      nextLines.reduce((sum, line) => sum + line.length, 0) + retainedPartialLine.length
-    let trimStartIndex = 0
-    while (trimStartIndex < nextLines.length && totalChars > MAX_TAIL_CHARS) {
-      totalChars -= nextLines[trimStartIndex].length
-      trimStartIndex += 1
-    }
-    if (trimStartIndex > 0) {
-      nextLines = nextLines.slice(trimStartIndex)
-      truncated = true
-    }
-  }
+    nextPartialLine.length > MAX_TAIL_PARTIAL_CHARS ||
+    built.truncated
 
   const redrawCursor =
     !partialResult.hadControl || partialResult.cursorColumn === nextPartialLine.length
@@ -107,21 +210,8 @@ export function appendNormalizedToTailBuffer(
   }
 }
 
-// Why a window: the unwindowed impl below is O(tail) per chunk (~93% of the event loop under TUI flood, findings log 2026-07-03); a redraw only touches rows the cursor reaches, so window the suffix and share the prefix by reference. Equivalence fuzz-verified in retained-tail-redraw-window.equivalence.test.ts.
+// Redraw reaches only a suffix; window it and share untouched rows to avoid O(tail) work per TUI chunk (retained-tail-redraw-window.equivalence.test.ts).
 const REDRAW_WINDOW_SAFETY_ROWS = 8
-
-function maxUpwardCursorReach(
-  normalizedChunk: string,
-  previousRedrawCursor: RetainedTailRedrawCursor | null
-): number {
-  let reach = previousRedrawCursor ? previousRedrawCursor.rowFromEnd : 0
-  const cursorUpPattern = new RegExp(`${String.fromCharCode(27)}\\[(\\d*)(?:;[\\d;]*)?A`, 'g')
-  let match: RegExpExecArray | null
-  while ((match = cursorUpPattern.exec(normalizedChunk)) !== null) {
-    reach += match[1] ? Number.parseInt(match[1], 10) : 1
-  }
-  return reach
-}
 
 function appendNormalizedToMultilineTailBuffer(
   previousLines: string[],
@@ -138,15 +228,28 @@ function appendNormalizedToMultilineTailBuffer(
   newlyCompletedLines: string[]
 } {
   const windowRows =
-    maxUpwardCursorReach(normalizedChunk, previousRedrawCursor) + REDRAW_WINDOW_SAFETY_ROWS
+    maxUpwardCursorReach(
+      normalizedChunk,
+      previousRedrawCursor,
+      previousLines.length - REDRAW_WINDOW_SAFETY_ROWS
+    ) + REDRAW_WINDOW_SAFETY_ROWS
   if (windowRows >= previousLines.length) {
-    return appendNormalizedToMultilineTailBufferUnwindowed(
+    const unwindowed = appendNormalizedToMultilineTailBufferUnwindowed(
       previousLines,
       boundedPreviousPartialLine,
       normalizedChunk,
       previousPartialWasCapped,
       previousRedrawCursor
     )
+    if (unwindowed.lines === previousLines) {
+      return unwindowed
+    }
+    // Why nothing carries: an unwindowed redraw may rewrite any retained row. Both caps were
+    // already applied inside the unwindowed builder, so the constructor only registers here.
+    return {
+      ...unwindowed,
+      lines: buildCarriedTailLines(previousLines, 0, 0, unwindowed.lines, null).lines
+    }
   }
   const prefixLength = previousLines.length - windowRows
   const suffix = previousLines.slice(prefixLength)
@@ -157,41 +260,37 @@ function appendNormalizedToMultilineTailBuffer(
     previousPartialWasCapped,
     previousRedrawCursor
   )
-  let lines = previousLines.slice(0, prefixLength)
-  // Why: the shared prefix must match the unwindowed finalize's trailing-space trim without paying a regex per untouched row.
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index]!
-    const lastChar = line.charCodeAt(line.length - 1)
-    if (lastChar === 32 || lastChar === 9) {
-      lines[index] = line.replace(/[ \t]+$/g, '')
+  // Carry the unreachable prefix only when already right-trimmed; otherwise rewrite it to match unwindowed finalization.
+  const previousStats = getRetainedTailLineStats(previousLines)
+  let keepEnd = prefixLength
+  let appended: readonly string[] = windowed.lines
+  if (!previousStats.rightTrimmed) {
+    const rewritten = previousLines.slice(0, prefixLength)
+    for (let index = 0; index < rewritten.length; index += 1) {
+      const line = rewritten[index]!
+      const lastChar = line.charCodeAt(line.length - 1)
+      if (lastChar === 32 || lastChar === 9) {
+        rewritten[index] = trimTerminalLineRight(line)
+      }
     }
+    for (const line of windowed.lines) {
+      rewritten.push(line)
+    }
+    keepEnd = 0
+    appended = rewritten
   }
-  for (const line of windowed.lines) {
-    lines.push(line)
-  }
-  let truncated = windowed.truncated
-  if (lines.length > MAX_TAIL_LINES) {
-    lines = lines.slice(lines.length - MAX_TAIL_LINES)
-    truncated = true
-  }
-  let totalChars = windowed.partialLine.length
-  for (const line of lines) {
-    totalChars += line.length
-  }
-  let dropCount = 0
-  while (dropCount < lines.length && totalChars > MAX_TAIL_CHARS) {
-    totalChars -= lines[dropCount]!.length
-    dropCount += 1
-  }
-  if (dropCount > 0) {
-    lines = lines.slice(dropCount)
-    truncated = true
-  }
+  const built = buildCarriedTailLines(
+    previousLines,
+    0,
+    keepEnd,
+    appended,
+    windowed.partialLine.length
+  )
   return {
-    lines,
+    lines: built.lines,
     partialLine: windowed.partialLine,
     redrawCursor: windowed.redrawCursor,
-    truncated,
+    truncated: windowed.truncated || built.truncated,
     newCompleteLines: windowed.newCompleteLines,
     newlyCompletedLines: windowed.newlyCompletedLines
   }

@@ -9,15 +9,14 @@ import { gitFetch } from '../../../git/remote'
 import { gitSyncForkDefaultBranch } from '../../../git/fork-sync'
 import { getUpstreamStatus } from '../../../git/upstream'
 import { validateGitPushTarget } from '../../../git/push-target-validation'
-import {
-  getSshGitProvider,
-  SSH_GIT_PROVIDER_UNAVAILABLE_MESSAGE
-} from '../../../providers/ssh-git-dispatch'
 import { resolveRegisteredWorktreePath } from '../../registered-worktree-roots-cache'
 import { getLocalGitOptionsForRegisteredWorktree } from '../../local-worktree-runtime-options'
-import { assertGitPushTargetShape } from '../../../../shared/git-push-target-validation'
 import { validateGitForkSyncExpectedUpstream } from '../../../../shared/git-fork-sync'
+import { ipcGitWorktreeTarget, materializeWorktreePushTargetRemote } from '../../worktree-remote'
 import type { FilesystemHandlerContext } from '../filesystem-handler-context'
+import { requireReachableGitRoute } from '../../../providers/execution-host-provider-dispatch'
+import { getConnectionExecutionHostId } from '../../../../shared/execution-host'
+import { assertWslUncPathRunning } from '../../../wsl/wsl-unc-access-gate'
 
 export function registerGitRemoteSyncHandlers(context: FilesystemHandlerContext): void {
   const { store } = context
@@ -28,22 +27,16 @@ export function registerGitRemoteSyncHandlers(context: FilesystemHandlerContext)
       _event,
       args: { worktreePath: string; connectionId?: string; pushTarget?: GitPushTarget }
     ): Promise<GitUpstreamStatus> => {
-      if (args.connectionId) {
-        if (args.pushTarget) {
-          assertGitPushTargetShape(args.pushTarget)
-        }
-        const provider = getSshGitProvider(args.connectionId)
-        if (!provider) {
-          throw new Error(SSH_GIT_PROVIDER_UNAVAILABLE_MESSAGE)
-        }
-        return provider.getUpstreamStatus(args.worktreePath, args.pushTarget)
-      }
+      requireReachableGitRoute(getConnectionExecutionHostId(args.connectionId))
+      // Background poll: its Git or UNC read would boot a stopped WSL distro (E9).
+      await assertWslUncPathRunning(args.worktreePath)
       const worktreePath = await resolveRegisteredWorktreePath(args.worktreePath, store)
       const gitOptions = getLocalGitOptionsForRegisteredWorktree(
         store,
         args.worktreePath,
         worktreePath
       )
+      await assertWslUncPathRunning(worktreePath, gitOptions.wslDistro)
       return getUpstreamStatus(worktreePath, args.pushTarget, gitOptions)
     }
   )
@@ -52,31 +45,37 @@ export function registerGitRemoteSyncHandlers(context: FilesystemHandlerContext)
     'git:fetch',
     async (
       _event,
-      args: { worktreePath: string; connectionId?: string; pushTarget?: GitPushTarget }
-    ): Promise<void> => {
-      if (args.connectionId) {
-        if (args.pushTarget) {
-          assertGitPushTargetShape(args.pushTarget)
-        }
-        const provider = getSshGitProvider(args.connectionId)
-        if (!provider) {
-          throw new Error(SSH_GIT_PROVIDER_UNAVAILABLE_MESSAGE)
-        }
-        return provider.fetchRemote(args.worktreePath, args.pushTarget)
+      args: {
+        worktreePath: string
+        worktreeId?: string
+        connectionId?: string
+        pushTarget?: GitPushTarget
       }
+    ): Promise<void> => {
+      requireReachableGitRoute(getConnectionExecutionHostId(args.connectionId))
       const worktreePath = await resolveRegisteredWorktreePath(args.worktreePath, store)
       const gitOptions = getLocalGitOptionsForRegisteredWorktree(
         store,
         args.worktreePath,
         worktreePath
       )
-      if (args.pushTarget) {
-        await validateGitPushTarget(worktreePath, args.pushTarget, {
+      const materializedPushTarget = args.pushTarget
+        ? await materializeWorktreePushTargetRemote(
+            worktreePath,
+            args.pushTarget,
+            store,
+            undefined,
+            gitOptions,
+            ipcGitWorktreeTarget(args)
+          )
+        : undefined
+      if (materializedPushTarget) {
+        await validateGitPushTarget(worktreePath, materializedPushTarget, {
           ...gitOptions,
           admissionTier: 'interactive'
         })
       }
-      await gitFetch(worktreePath, args.pushTarget, {
+      await gitFetch(worktreePath, materializedPushTarget, {
         ...gitOptions,
         admissionTier: 'interactive'
       })
@@ -96,13 +95,7 @@ export function registerGitRemoteSyncHandlers(context: FilesystemHandlerContext)
       const expectedUpstream = validateGitForkSyncExpectedUpstream(args.expectedUpstream, {
         required: true
       })
-      if (args.connectionId) {
-        const provider = getSshGitProvider(args.connectionId)
-        if (!provider) {
-          throw new Error(SSH_GIT_PROVIDER_UNAVAILABLE_MESSAGE)
-        }
-        return provider.syncForkDefaultBranch(args.worktreePath, expectedUpstream)
-      }
+      requireReachableGitRoute(getConnectionExecutionHostId(args.connectionId))
       const worktreePath = await resolveRegisteredWorktreePath(args.worktreePath, store)
       const gitOptions = getLocalGitOptionsForRegisteredWorktree(
         store,

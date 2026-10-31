@@ -9,8 +9,9 @@ const classifiers = vi.hoisted(() => ({
   exceedsSizeLimit: vi.fn<(content: string) => boolean>()
 }))
 
+// Cache decisions but resolve localized messages per read; use message text as the stub reason to expose both seams.
 vi.mock('./markdown-rich-mode', () => ({
-  getMarkdownRichModeEligibility: ({
+  getMarkdownRichModeEligibilityDecision: ({
     content,
     sizeOverridden
   }: {
@@ -18,8 +19,9 @@ vi.mock('./markdown-rich-mode', () => ({
     sizeOverridden: boolean
   }) => ({
     exceedsSizeLimit: !sizeOverridden && classifiers.exceedsSizeLimit(content),
-    unsupportedMessage: classifiers.getUnsupportedMessage(content)
-  })
+    unsupportedReason: classifiers.getUnsupportedMessage(content)
+  }),
+  resolveMarkdownRichModeUnsupportedMessage: (reason: string | null) => reason
 }))
 
 vi.mock('./editor-lazy-views', () => {
@@ -58,6 +60,7 @@ vi.mock('./useEditorConflictNavigation', () => ({
 vi.mock('@/store', () => {
   const state = {
     markdownRichModeSizeOverridden: false,
+    markdownRichModeSizeOverride: {},
     setMarkdownRichModeSizeOverride: () => {},
     reloadOpenCheckRunDetailsTab: () => {}
   }
@@ -71,6 +74,7 @@ vi.mock('@/store', () => {
 
 import { EditorContent } from './EditorContent'
 import { getEditorPanelRenderModel } from './editor-panel-render-model'
+import { resetMarkdownRichModeEligibilityCache } from './markdown-rich-mode-eligibility-cache'
 
 function openFile(
   language: 'markdown' | 'typescript' = 'markdown',
@@ -172,6 +176,7 @@ function getGuardedRenderModel({
 }
 
 beforeEach(() => {
+  resetMarkdownRichModeEligibilityCache()
   classifiers.getUnsupportedMessage.mockImplementation((content) =>
     content.includes('[reference]:') ? 'Reference links require source mode.' : null
   )
@@ -181,6 +186,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+  resetMarkdownRichModeEligibilityCache()
 })
 
 describe('inline Markdown render classification', () => {
@@ -280,10 +286,12 @@ describe('inline Markdown render classification', () => {
     expect(classifiers.exceedsSizeLimit).not.toHaveBeenCalled()
   })
 
-  it('preserves unsupported and oversized rich-mode fallbacks', () => {
+  it('renders unsupported rich drafts in preview while keeping oversized drafts in source', () => {
     const unsupported = renderEditPath({ content: '[reference]: https://example.com' })
 
-    expect(unsupported.model.canExportMarkdownToPdf).toBe(false)
+    expect(unsupported.view.container.innerHTML).toContain('data-editor-view="preview"')
+    expect(unsupported.view.container.innerHTML).not.toContain('data-editor-view="source"')
+    expect(unsupported.model.canExportMarkdownToPdf).toBe(true)
     expect(unsupported.view.getByText('Reference links require source mode.')).toBeTruthy()
     expect(unsupported.view.queryByText('Open anyway')).toBeNull()
     unsupported.view.unmount()
@@ -293,5 +301,16 @@ describe('inline Markdown render classification', () => {
     expect(oversized.model.canExportMarkdownToPdf).toBe(false)
     expect(oversized.view.getByText(/File is larger than the .* rich editing limit/)).toBeTruthy()
     expect(oversized.view.getByText('Open anyway')).toBeTruthy()
+  })
+
+  it('keeps unsupported drafts editable when Source is selected', () => {
+    const source = renderEditPath({
+      content: '[reference]: https://example.com',
+      viewMode: 'source'
+    })
+
+    expect(source.view.container.innerHTML).toContain('data-editor-view="source"')
+    expect(source.view.container.innerHTML).not.toContain('data-editor-view="preview"')
+    expect(classifiers.getUnsupportedMessage).not.toHaveBeenCalled()
   })
 })

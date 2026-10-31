@@ -1,21 +1,26 @@
 import { useAppStore } from '../store'
 import {
+  canAdmitTerminalTabsForStartup,
   canDeferColdActivationTabsForHost,
-  canMountTerminalWorkspaceForStartup,
   planColdActivationTabDeferral,
   pruneClosedBackgroundMountTabs,
   revealActivationDeferredTabs
 } from './terminal/background-terminal-worktree-mount'
-import { hasRegisteredRuntimeTerminalTab } from '../runtime/sync-runtime-graph'
+import {
+  holdTerminalTabsForStartup,
+  releaseStartupTerminalTabHold
+} from './terminal/startup-terminal-tab-hold'
+import { hasRegisteredRuntimeTerminalTab } from '../runtime/mounted-terminal-tab-registry'
 import { anyMountedWorktreeHasLayout as computeAnyMountedWorktreeHasLayout } from './terminal/split-group-mount'
 import { isParkRestorableTerminalPty } from './terminal-pane/terminal-hidden-view-parking'
 import { canWatcherCoverParkedTerminalTab } from './terminal-pane/terminal-parked-tab-watchers'
-import { isRemoteRuntimePtyId } from '@/runtime/runtime-terminal-inspection'
+import { isRemoteRuntimePtyId } from '../../../shared/remote-runtime/remote-runtime-pty-id'
 import { terminalProviderHasAuthoritativeSnapshot } from './terminal/terminal-provider-snapshot-capability'
 import type { TerminalParkingFoundation } from './use-terminal-parking-foundation'
 
 export function applyTerminalColdActivation(controller: TerminalParkingFoundation) {
   const {
+    activationDeferralPlanRevisionRef,
     activationDeferredMountTabIdsByWorktreeRef,
     activeGroupIdByWorktree,
     activeTabId,
@@ -31,21 +36,32 @@ export function applyTerminalColdActivation(controller: TerminalParkingFoundatio
     pairedRuntimeParkingEnvironmentIds,
     pendingStartupByTabId,
     renderedActiveWorktreeId,
+    startupTerminalTabHoldRef,
     startupWorktreeRefreshCompleted,
     tabsByWorktree,
     terminalParkingEnabled,
     terminalTitleSnapshotAuthorityEnabled,
     workspaceSessionReady,
-    workspaceSurfaces
+    workspaceSurfaceIds,
+    workspaceSurfaceIdSet
   } = controller
-  if (
+  // Mount hydrated non-terminal surfaces immediately; hold only terminals until startup publishes PTY ownership.
+  const startupHeldWorktreeId =
     renderedActiveWorktreeId &&
-    canMountTerminalWorkspaceForStartup({
+    !canAdmitTerminalTabsForStartup({
       workspaceSessionReady,
       hydrationSucceeded,
       startupWorktreeRefreshCompleted
     })
-  ) {
+      ? renderedActiveWorktreeId
+      : null
+  releaseStartupTerminalTabHold(
+    startupTerminalTabHoldRef,
+    backgroundMountTabIdsByWorktreeRef.current,
+    mountedWorktreeIdsRef.current,
+    startupHeldWorktreeId
+  )
+  if (renderedActiveWorktreeId && !startupHeldWorktreeId) {
     const worktreeTabs = tabsByWorktree[renderedActiveWorktreeId] ?? []
     const coldActivationDeferralEnabled =
       terminalParkingEnabled && terminalTitleSnapshotAuthorityEnabled
@@ -95,7 +111,7 @@ export function applyTerminalColdActivation(controller: TerminalParkingFoundatio
     if (lastActivationWorktreeIdRef.current !== renderedActiveWorktreeId) {
       lastActivationWorktreeIdRef.current = renderedActiveWorktreeId
       const tabById = new Map(worktreeTabs.map((tab) => [tab.id, tab]))
-      planColdActivationTabDeferral({
+      const installedDeferralPlan = planColdActivationTabDeferral({
         restrictions: backgroundMountTabIdsByWorktreeRef.current,
         deferredMountTabIdsByWorktree: activationDeferredMountTabIdsByWorktreeRef.current,
         worktreeId: renderedActiveWorktreeId,
@@ -117,6 +133,10 @@ export function applyTerminalColdActivation(controller: TerminalParkingFoundatio
         },
         immediateTabIds
       })
+      // Installing mutates refs only; advance a revision so the admission effect can drain the plan.
+      if (installedDeferralPlan) {
+        activationDeferralPlanRevisionRef.current += 1
+      }
     } else if (!coldActivationDeferralEnabled || !activationHostSupportsDeferral) {
       backgroundMountTabIdsByWorktreeRef.current.delete(renderedActiveWorktreeId)
       activationDeferredMountTabIdsByWorktreeRef.current.delete(renderedActiveWorktreeId)
@@ -150,22 +170,34 @@ export function applyTerminalColdActivation(controller: TerminalParkingFoundatio
     tabsByWorktree,
     activationDeferredMountTabIdsByWorktreeRef.current
   )
-  const allWorktreeIds = new Set(workspaceSurfaces.map((workspace) => workspace.id))
+  if (startupHeldWorktreeId) {
+    holdTerminalTabsForStartup(
+      startupTerminalTabHoldRef,
+      backgroundMountTabIdsByWorktreeRef.current,
+      mountedWorktreeIdsRef.current,
+      startupHeldWorktreeId,
+      (tabsByWorktree[startupHeldWorktreeId] ?? []).map((tab) => tab.id)
+    )
+  }
   for (const id of mountedWorktreeIdsRef.current) {
-    if (!allWorktreeIds.has(id)) {
+    if (!workspaceSurfaceIdSet.has(id)) {
       mountedWorktreeIdsRef.current.delete(id)
       backgroundMountTabIdsByWorktreeRef.current.delete(id)
       activationDeferredMountTabIdsByWorktreeRef.current.delete(id)
     }
   }
   const anyMountedWorktreeHasLayout = computeAnyMountedWorktreeHasLayout(
-    workspaceSurfaces.map((workspace) => workspace.id),
+    workspaceSurfaceIds,
     mountedWorktreeIdsRef.current,
     layoutByWorktree,
     groupsByWorktree,
     activeGroupIdByWorktree
   )
-  return { anyMountedWorktreeHasLayout }
+  return {
+    anyMountedWorktreeHasLayout,
+    activationDeferralPlanRevision: activationDeferralPlanRevisionRef.current,
+    startupTerminalTabHold: startupTerminalTabHoldRef.current
+  }
 }
 
 export type TerminalColdActivationController = TerminalParkingFoundation &

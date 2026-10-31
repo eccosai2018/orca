@@ -1,3 +1,4 @@
+import { settledWriteStub } from '../../providers/settled-pty-write-stub'
 import { describe, expect, it, vi } from 'vitest'
 import { OrcaRuntimeService, OrchestrationDb } from '../orca-runtime-test-mocks.spec'
 import {
@@ -8,6 +9,7 @@ import {
   store,
   syncSinglePty
 } from '../orca-runtime-test-fixtures.spec'
+import { MessageWake } from '../runtime-message-waiters'
 
 describe('OrcaRuntimeService', () => {
   it('delivers pending mail via notifyMessageArrived when the recipient is already idle', async () => {
@@ -19,6 +21,7 @@ describe('OrcaRuntimeService', () => {
       setInMemoryOrchestrationMessages(runtime, db)
       runtime.setPtyController({
         write,
+        writeWithSettlement: settledWriteStub(write),
         kill: vi.fn(),
         getForegroundProcess: async () => null
       })
@@ -35,11 +38,10 @@ describe('OrcaRuntimeService', () => {
         subject: 'after wait'
       })
 
-      // Why: notifyMessageArrived is the send-path hook; it must push-on-idle
-      // without requiring another agent-status transition (#12536).
+      // #12536: message arrival must push to idle agents without another status transition.
       runtime.notifyMessageArrived(terminal.handle, 'status')
 
-      // The push is deferred one microtask so it lands behind any resolved check.
+      // Defer push one microtask behind already-resolved checks.
       await Promise.resolve()
       expect(write).toHaveBeenCalledWith(
         'pty-1',
@@ -64,6 +66,7 @@ describe('OrcaRuntimeService', () => {
       setInMemoryOrchestrationMessages(runtime, db)
       runtime.setPtyController({
         write,
+        writeWithSettlement: settledWriteStub(write),
         kill: vi.fn(),
         getForegroundProcess: async () => null
       })
@@ -75,7 +78,6 @@ describe('OrcaRuntimeService', () => {
         coordinator_handle: terminal.handle,
         coordinator_pane_key: `${terminal.tabId}:${terminal.leafId}`
       })
-      runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
       const message = db.insertMessage({
         from: 'term_worker',
         to: 'run:run_mailbox',
@@ -91,7 +93,7 @@ describe('OrcaRuntimeService', () => {
       runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        '\nYou have 1 orchestration message. Run `orca orchestration check --run run_mailbox`.\n'
+        '\nYou have 1 orchestration message. Run `orca-dev orchestration check --run run_mailbox`.\n'
       )
       expect(write).not.toHaveBeenCalledWith(
         'pty-1',
@@ -106,8 +108,7 @@ describe('OrcaRuntimeService', () => {
       await vi.advanceTimersByTimeAsync(500)
       expect(
         write.mock.calls.filter(
-          ([, payload]) =>
-            typeof payload === 'string' && payload.includes('orca orchestration check')
+          ([, payload]) => typeof payload === 'string' && payload.includes('orchestration check')
         )
       ).toHaveLength(1)
       db.close()
@@ -125,6 +126,7 @@ describe('OrcaRuntimeService', () => {
       setInMemoryOrchestrationMessages(runtime, db)
       runtime.setPtyController({
         write,
+        writeWithSettlement: settledWriteStub(write),
         kill: vi.fn(),
         getForegroundProcess: async () => null
       })
@@ -152,7 +154,7 @@ describe('OrcaRuntimeService', () => {
       })
       runtime.notifyMessageArrived('run:run_stale_waiter', 'worker_done')
 
-      await expect(staleWait).resolves.toBe('notified')
+      await expect(staleWait).resolves.toBeInstanceOf(MessageWake)
       expect(write).not.toHaveBeenCalled()
 
       db.insertMessage({
@@ -166,8 +168,7 @@ describe('OrcaRuntimeService', () => {
 
       const pointers = () =>
         write.mock.calls.filter(
-          ([, payload]) =>
-            typeof payload === 'string' && payload.includes('orca orchestration check')
+          ([, payload]) => typeof payload === 'string' && payload.includes('orchestration check')
         )
       expect(pointers()).toHaveLength(1)
       expect(pointers()[0]?.[1]).toContain('You have 1 orchestration message')
@@ -181,100 +182,8 @@ describe('OrcaRuntimeService', () => {
     }
   })
 
-  it('repoints on the retry edge when live idle won the send race', async () => {
-    vi.useFakeTimers()
-    try {
-      const runtime = new OrcaRuntimeService(store)
-      const db = new InMemoryOrchestrationMessages()
-      const write = vi.fn().mockReturnValue(true)
-      setInMemoryOrchestrationMessages(runtime, db)
-      runtime.setPtyController({
-        write,
-        kill: vi.fn(),
-        getForegroundProcess: async () => null
-      })
-      syncSinglePty(runtime)
-
-      const [terminal] = (await runtime.listTerminals()).terminals
-      bindSinglePtyRun(db, terminal.handle)
-      runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
-      db.insertMessage({
-        from: 'term_worker',
-        to: terminal.handle,
-        subject: 'settled at idle edge',
-        type: 'worker_done'
-      })
-      runtime.notifyMessageArrived(terminal.handle, 'worker_done')
-      await Promise.resolve()
-      expect(write).not.toHaveBeenCalled()
-
-      const leaf = [
-        ...(
-          runtime as unknown as {
-            leaves: Map<
-              string,
-              { lastAgentStatus: string | null; lastAgentStatusObservedLive: boolean }
-            >
-          }
-        ).leaves.values()
-      ][0]
-      leaf.lastAgentStatus = 'idle'
-      leaf.lastAgentStatusObservedLive = true
-
-      await vi.advanceTimersByTimeAsync(2_000)
-      expect(write).toHaveBeenCalledWith(
-        'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
-      )
-      db.close()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('leaves later delivery to the idle edge instead of polling a working mailbox', async () => {
-    vi.useFakeTimers()
-    try {
-      const runtime = new OrcaRuntimeService(store)
-      const db = new InMemoryOrchestrationMessages()
-      const pendingReads = vi.spyOn(db, 'getUndeliveredUnreadMessages')
-      const write = vi.fn().mockReturnValue(true)
-      setInMemoryOrchestrationMessages(runtime, db)
-      runtime.setPtyController({
-        write,
-        kill: vi.fn(),
-        getForegroundProcess: async () => null
-      })
-      syncSinglePty(runtime)
-
-      const [terminal] = (await runtime.listTerminals()).terminals
-      bindSinglePtyRun(db, terminal.handle)
-      runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
-      db.insertMessage({
-        from: 'term_worker',
-        to: terminal.handle,
-        subject: 'wait for idle'
-      })
-      runtime.notifyMessageArrived(terminal.handle, 'status')
-      await Promise.resolve()
-
-      await vi.advanceTimersByTimeAsync(20_000)
-      expect(pendingReads).not.toHaveBeenCalled()
-      expect(pendingMailPointerRepoints(runtime)).toBe(0)
-
-      runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
-      expect(pendingReads).toHaveBeenCalledTimes(1)
-      expect(write).toHaveBeenCalledWith(
-        'pty-1',
-        expect.stringContaining('You have 1 orchestration message')
-      )
-      db.close()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('points restored mail when a live-idle PTY remounts after the repair edge', async () => {
+  // Mail follows the terminal: a window reload does not hold a live-idle terminal's restored mail.
+  it('points restored mail at the repair edge while the window reloads', async () => {
     vi.useFakeTimers()
     try {
       const runtime = new OrcaRuntimeService(store)
@@ -282,6 +191,7 @@ describe('OrcaRuntimeService', () => {
       const write = vi.fn().mockReturnValue(true)
       runtime.setPtyController({
         write,
+        writeWithSettlement: settledWriteStub(write),
         kill: vi.fn(),
         getForegroundProcess: async () => null
       })
@@ -301,9 +211,6 @@ describe('OrcaRuntimeService', () => {
       setInMemoryOrchestrationMessages(runtime, db)
 
       await vi.advanceTimersByTimeAsync(2_000)
-      expect(write).not.toHaveBeenCalled()
-
-      syncSinglePty(runtime)
       expect(write).toHaveBeenCalledWith(
         'pty-1',
         expect.stringContaining('You have 1 orchestration message')
@@ -323,6 +230,7 @@ describe('OrcaRuntimeService', () => {
       setInMemoryOrchestrationMessages(runtime, db)
       runtime.setPtyController({
         write,
+        writeWithSettlement: settledWriteStub(write),
         kill: vi.fn(),
         getForegroundProcess: async () => null
       })
@@ -343,8 +251,7 @@ describe('OrcaRuntimeService', () => {
 
       expect(
         write.mock.calls.filter(
-          ([, payload]) =>
-            typeof payload === 'string' && payload.includes('orca orchestration check')
+          ([, payload]) => typeof payload === 'string' && payload.includes('orchestration check')
         )
       ).toHaveLength(1)
       expect(pendingMailPointerRepoints(runtime)).toBe(0)
@@ -362,6 +269,7 @@ describe('OrcaRuntimeService', () => {
       const write = vi.fn().mockReturnValue(true)
       runtime.setPtyController({
         write,
+        writeWithSettlement: settledWriteStub(write),
         kill: vi.fn(),
         getForegroundProcess: async () => null
       })
@@ -401,6 +309,7 @@ describe('OrcaRuntimeService', () => {
       runtime.setOrchestrationDb(db)
       runtime.setPtyController({
         write,
+        writeWithSettlement: settledWriteStub(write),
         kill: vi.fn(),
         getForegroundProcess: async () => null
       })
@@ -408,7 +317,12 @@ describe('OrcaRuntimeService', () => {
 
       const [terminal] = (await runtime.listTerminals()).terminals
       runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
-      db.insertMessage({ from: 'term_worker', to: terminal.handle, subject: 'pending' })
+      db.insertMessage({
+        runId: 'run_legacy_local',
+        from: 'term_worker',
+        to: terminal.handle,
+        subject: 'pending'
+      })
       runtime.notifyMessageArrived(terminal.handle, 'status')
       db.close()
 
@@ -426,6 +340,7 @@ describe('OrcaRuntimeService', () => {
     setInMemoryOrchestrationMessages(runtime, db)
     runtime.setPtyController({
       write,
+      writeWithSettlement: settledWriteStub(write),
       kill: vi.fn(),
       getForegroundProcess: async () => 'codex'
     })
@@ -456,19 +371,20 @@ describe('OrcaRuntimeService', () => {
     await vi.waitFor(() => {
       expect(write).toHaveBeenCalledWith(
         'pty-1',
-        '\nYou have 1 orchestration message. Run `orca orchestration check --run run_codex_native_title`.\n'
+        '\nYou have 1 orchestration message. Run `orca-dev orchestration check --run run_codex_native_title`.\n'
       )
     })
     db.close()
   })
 
-  it('does not inject pending mail on notify when the recipient is still working', async () => {
+  it('does not inject pending mail on notify when the recipient awaits permission', async () => {
     const runtime = new OrcaRuntimeService(store)
     const db = new InMemoryOrchestrationMessages()
     const write = vi.fn().mockReturnValue(true)
     setInMemoryOrchestrationMessages(runtime, db)
     runtime.setPtyController({
       write,
+      writeWithSettlement: settledWriteStub(write),
       kill: vi.fn(),
       getForegroundProcess: async () => null
     })
@@ -476,11 +392,11 @@ describe('OrcaRuntimeService', () => {
 
     const [terminal] = (await runtime.listTerminals()).terminals
     bindSinglePtyRun(db, terminal.handle)
-    runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
+    runtime.onPtyData('pty-1', '\x1b]0;Codex waiting for permission\x07', 100)
     const message = db.insertMessage({
       from: 'sender',
       to: terminal.handle,
-      subject: 'while working'
+      subject: 'while asking'
     })
     write.mockClear()
 
@@ -488,8 +404,7 @@ describe('OrcaRuntimeService', () => {
     await Promise.resolve()
 
     expect(write).not.toHaveBeenCalled()
-    // Why: busy must leave the row undelivered so a later idle can push it;
-    // a stamp-without-write would suppress later delivery (#12584 CodeRabbit).
+    // Held rows must remain undelivered for a later edge; stamping without writing would lose delivery (#12584).
     expect(message.delivered_at).toBeNull()
     db.close()
   })
@@ -503,6 +418,7 @@ describe('OrcaRuntimeService', () => {
       setInMemoryOrchestrationMessages(runtime, db)
       runtime.setPtyController({
         write,
+        writeWithSettlement: settledWriteStub(write),
         kill: vi.fn(),
         getForegroundProcess: async () => null
       })
@@ -520,9 +436,7 @@ describe('OrcaRuntimeService', () => {
       await Promise.resolve()
       write.mockClear()
 
-      // Why no working frame: a resumed agent sitting at its prompt emits an
-      // already-idle title first. The seed left lastAgentStatus 'idle', so there
-      // is no transition — only the liveness edge can release the row (#12536).
+      // Resumed agents can report idle first; seeded idle has no transition, so liveness alone must release mail (#12536).
       runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 100)
 
       expect(write).toHaveBeenCalledWith(
@@ -546,6 +460,7 @@ describe('OrcaRuntimeService', () => {
       setInMemoryOrchestrationMessages(runtime, db)
       runtime.setPtyController({
         write,
+        writeWithSettlement: settledWriteStub(write),
         kill: vi.fn(),
         getForegroundProcess: async () => null
       })
@@ -553,8 +468,7 @@ describe('OrcaRuntimeService', () => {
 
       const [terminal] = (await runtime.listTerminals()).terminals
       bindSinglePtyRun(db, terminal.handle)
-      // Why: the persisted title is historical — the agent may have gone busy
-      // across the relaunch, so a seeded 'idle' must not authorize a PTY write.
+      // Persisted idle is historical; never authorize writes to a possibly busy replacement.
       runtime.seedTerminalRestoreTail('pty-1', { lastTitle: 'Codex done' })
       const message = db.insertMessage({
         from: 'sender',
@@ -570,7 +484,6 @@ describe('OrcaRuntimeService', () => {
       await vi.advanceTimersByTimeAsync(600)
       expect(message.delivered_at).toBeNull()
 
-      // The first live idle frame authorizes it and the row still delivers.
       runtime.onPtyData('pty-1', '\x1b]0;Codex working\x07', 100)
       runtime.onPtyData('pty-1', '\x1b]0;Codex done\x07', 101)
       expect(write).toHaveBeenCalledWith(
@@ -594,6 +507,7 @@ describe('OrcaRuntimeService', () => {
       setInMemoryOrchestrationMessages(runtime, db)
       runtime.setPtyController({
         write,
+        writeWithSettlement: settledWriteStub(write),
         kill: vi.fn(),
         getForegroundProcess: async () => null
       })
@@ -606,10 +520,7 @@ describe('OrcaRuntimeService', () => {
       await runtime.waitForTerminal(terminal.handle, { condition: 'tui-idle' })
       write.mockClear()
 
-      // Why: resolveMessageWaiter removes the waiter synchronously, but the check
-      // handler marks its rows read a microtask later. Two sends resuming off one
-      // shared in-flight promise put a no-waiter notify inside that window, so the
-      // push must not inject rows the resolved check is about to return.
+      // Waiter removal precedes read-marking by a microtask; deferred push must not duplicate the resolving check's rows.
       const consumed = runtime
         .waitForMessage(mailbox, { timeoutMs: 5_000 })
         .then(() => db.getUnreadMessages(mailbox).map((row) => (row.read = 1)))

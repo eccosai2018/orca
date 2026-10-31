@@ -141,11 +141,8 @@ function inventoryAbsenceCoordinates(args: {
       surfaceKey: args.surface.surfaceKey,
       expectedEnvironmentPairingRevision: args.expectedEnvironmentPairingRevision
     }),
-    fingerprint: [
-      args.snapshot.publicationEpoch,
-      args.surface.handle,
-      args.surface.expectedPtyId ?? ''
-    ].join('\0')
+    // Absence fingerprints identify surfaces, not publicationEpoch: including epoch resets evidence on republication and prevents two independent inventories confirming absence.
+    fingerprint: [args.surface.handle, args.surface.expectedPtyId ?? ''].join('\0')
   }
 }
 

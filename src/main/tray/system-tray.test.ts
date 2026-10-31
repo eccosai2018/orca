@@ -142,8 +142,7 @@ function builtMenuItems(): MenuItem[] {
   return menuFromTemplateMock.mock.calls.at(-1)?.[0] as MenuItem[]
 }
 
-// Why: tray image/tooltip writes are deferred off the caller's stack to keep the
-// NSStatusItem scene update out of AppKit's dispatch; run the pending turn.
+// Flush the deferred native scene mutation after the AppKit caller stack returns.
 function flushTraySceneMutation(): void {
   vi.advanceTimersByTime(0)
 }
@@ -201,8 +200,8 @@ describe('createSystemTray', () => {
 
     expect(trayInstances).toHaveLength(1)
     expect(trayInstances[0].image).toBe(resizedImage)
-    expect(trayInstances[0].setToolTip).toHaveBeenCalledWith('Orca')
-    expect(builtMenuItems().map((item) => item.label)).toEqual(['Open Orca', undefined, 'Quit'])
+    expect(trayInstances[0].setToolTip).toHaveBeenCalledWith('Dark Factory')
+    expect(builtMenuItems().map((item) => item.label)).toEqual(['Open Dark Factory', undefined, 'Quit'])
     const clickHandler = trayInstances[0].on.mock.calls.find((call) => call[0] === 'click')?.[1]
     expect(clickHandler).toBeTypeOf('function')
 
@@ -228,7 +227,7 @@ describe('createSystemTray', () => {
       dataURL: 'data:image/png;base64,mac-retina'
     })
     expect(builtMenuItems().map((item) => item.label)).toEqual([
-      'Open Orca',
+      'Open Dark Factory',
       undefined,
       'Settings',
       'Check for Updates...',
@@ -239,7 +238,7 @@ describe('createSystemTray', () => {
     expect(nativeThemeMock.on).toHaveBeenCalledWith('updated', expect.any(Function))
 
     for (const [label, callback] of [
-      ['Open Orca', options.onOpen],
+      ['Open Dark Factory', options.onOpen],
       ['Settings', options.onOpenSettings],
       ['Check for Updates...', options.onCheckForUpdates],
       ['Quit', options.onQuit]
@@ -250,6 +249,34 @@ describe('createSystemTray', () => {
       expect(callback).toHaveBeenCalledOnce()
     }
   })
+
+  it.each(['win32', 'darwin'] as const)(
+    'offers Quit Completely directly above Quit on %s when a handler is supplied',
+    async (platform) => {
+      setPlatform(platform)
+      const { createSystemTray } = await loadModule()
+      const options = { ...createOptions(), onQuitAndStopAllSessions: vi.fn() }
+
+      createSystemTray(options)
+
+      expect(builtMenuItems().map((item) => item.label)).toEqual(
+        platform === 'darwin'
+          ? [
+              'Open Dark Factory',
+              undefined,
+              'Settings',
+              'Check for Updates...',
+              undefined,
+              'Quit Completely...',
+              'Quit'
+            ]
+          : ['Open Dark Factory', undefined, 'Quit Completely...', 'Quit']
+      )
+      builtMenuItems().at(-2)?.click?.()
+      expect(options.onQuitAndStopAllSessions).toHaveBeenCalledOnce()
+      expect(options.onQuit).not.toHaveBeenCalled()
+    }
+  )
 
   it('does not create a blank macOS item when the template asset fails to load', async () => {
     setPlatform('darwin')
@@ -291,9 +318,9 @@ describe('dev instance indicator', () => {
     expect(devBadgeImage.setTemplateImage).toHaveBeenCalledWith(true)
     expect(trayInstances[0].image).toBe(devBadgeImage)
     expect(trayInstances[0].setTitle).not.toHaveBeenCalled()
-    expect(trayInstances[0].setToolTip).toHaveBeenCalledWith('Orca DEV (my-branch)')
+    expect(trayInstances[0].setToolTip).toHaveBeenCalledWith('Dark Factory DEV (my-branch)')
     expect(builtMenuItems()[0]).toMatchObject({
-      label: 'Orca DEV (my-branch)',
+      label: 'Dark Factory DEV (my-branch)',
       enabled: false
     })
   })
@@ -331,8 +358,8 @@ describe('dev instance indicator', () => {
 
     createSystemTray(createOptions({ isDevInstance: true }))
 
-    expect(trayInstances[0].setToolTip).toHaveBeenCalledWith('Orca DEV')
-    expect(builtMenuItems()[0]).toMatchObject({ label: 'Orca DEV', enabled: false })
+    expect(trayInstances[0].setToolTip).toHaveBeenCalledWith('Dark Factory DEV')
+    expect(builtMenuItems()[0]).toMatchObject({ label: 'Dark Factory DEV', enabled: false })
   })
 
   it('keeps the DEV marker in the tooltip across the attention toggle', async () => {
@@ -344,10 +371,10 @@ describe('dev instance indicator', () => {
 
     setTrayAttention(true)
     flushTraySceneMutation()
-    expect(created.setToolTip).toHaveBeenCalledWith('Orca DEV (my-branch) - activity waiting')
+    expect(created.setToolTip).toHaveBeenCalledWith('Dark Factory DEV (my-branch) - activity waiting')
     setTrayAttention(false)
     flushTraySceneMutation()
-    expect(created.setToolTip).toHaveBeenLastCalledWith('Orca DEV (my-branch)')
+    expect(created.setToolTip).toHaveBeenLastCalledWith('Dark Factory DEV (my-branch)')
   })
 
   it('marks the Windows tooltip without badging the icon', async () => {
@@ -356,9 +383,9 @@ describe('dev instance indicator', () => {
 
     createSystemTray(createOptions({ isDevInstance: true, devInstanceLabel: 'my-branch' }))
 
-    expect(trayInstances[0].setToolTip).toHaveBeenCalledWith('Orca DEV (my-branch)')
+    expect(trayInstances[0].setToolTip).toHaveBeenCalledWith('Dark Factory DEV (my-branch)')
     expect(stampDevBadgeMock).not.toHaveBeenCalled()
-    expect(builtMenuItems()[0]).toMatchObject({ label: 'Orca DEV (my-branch)', enabled: false })
+    expect(builtMenuItems()[0]).toMatchObject({ label: 'Dark Factory DEV (my-branch)', enabled: false })
   })
 
   it('adds no DEV marker for production instances', async () => {
@@ -369,7 +396,7 @@ describe('dev instance indicator', () => {
 
     expect(stampDevBadgeMock).not.toHaveBeenCalled()
     expect(trayInstances[0].image).toBe(baseMacImage)
-    expect(builtMenuItems()[0].label).toBe('Open Orca')
+    expect(builtMenuItems()[0].label).toBe('Open Dark Factory')
   })
 })
 
@@ -419,8 +446,7 @@ describe('setTrayAttention', () => {
     flushTraySceneMutation()
     expect(tintTemplateMock).toHaveBeenCalledWith(baseMacImage, false)
     expect(composeAttentionMock).toHaveBeenCalledWith(tintedMacImage)
-    // Why: the attention image is rebuilt from 1x pixels, so the @2x
-    // representation must be re-added or the glyph blurs on Retina.
+    // Bitmap rebuild starts at 1x; re-add 2x or attention glyphs blur on Retina.
     expect(tintTemplateMock).toHaveBeenCalledWith(baseMacImage, false, 2)
     expect(attentionImage.addRepresentation).toHaveBeenCalledWith({
       scaleFactor: 2,
@@ -428,13 +454,13 @@ describe('setTrayAttention', () => {
     })
     expect(attentionImage.setTemplateImage).toHaveBeenCalledWith(false)
     expect(created.setImage).toHaveBeenCalledWith(attentionImage)
-    expect(created.setToolTip).toHaveBeenCalledWith('Orca - activity waiting')
+    expect(created.setToolTip).toHaveBeenCalledWith('Dark Factory - activity waiting')
 
     setTrayAttention(false)
     flushTraySceneMutation()
     expect(baseMacImage.setTemplateImage).toHaveBeenLastCalledWith(true)
     expect(created.setImage).toHaveBeenLastCalledWith(baseMacImage)
-    expect(created.setToolTip).toHaveBeenLastCalledWith('Orca')
+    expect(created.setToolTip).toHaveBeenLastCalledWith('Dark Factory')
   })
 
   it('recomposes active macOS attention when the system appearance changes', async () => {
@@ -447,7 +473,7 @@ describe('setTrayAttention', () => {
     nativeThemeMock.shouldUseDarkColors = true
 
     themeState.updatedListener?.()
-    // Why: appearance changes arrive on an AppKit dispatch too, so the recompose defers.
+    // Appearance events also arrive from AppKit; defer their native writes.
     expect(tintTemplateMock).not.toHaveBeenCalled()
 
     flushTraySceneMutation()
@@ -485,8 +511,7 @@ describe('setTrayAttention', () => {
     created.setImage.mockClear()
     created.setToolTip.mockClear()
 
-    // Why: show/restore call this from AppKit's window-state dispatch; a scene
-    // update sent there self-deadlocks the main thread on macOS 26.
+    // Native scene writes inside AppKit window-state dispatch can deadlock main on macOS 26.
     setTrayAttention(true)
     expect(created.setImage).not.toHaveBeenCalled()
     expect(created.setToolTip).not.toHaveBeenCalled()
@@ -600,7 +625,7 @@ describe('macOS hardening', () => {
     setTrayAttention(true)
     expect(() => flushTraySceneMutation()).not.toThrow()
     expect(created.setImage).toHaveBeenLastCalledWith(baseMacImage)
-    expect(created.setToolTip).toHaveBeenLastCalledWith('Orca')
+    expect(created.setToolTip).toHaveBeenLastCalledWith('Dark Factory')
     expect(warn).toHaveBeenCalledWith(
       '[system-tray] macOS attention icon failed; showing plain icon',
       expect.any(Error)
@@ -620,5 +645,85 @@ describe('macOS hardening', () => {
     const settingsItem = builtMenuItems().find((item) => item.label === 'Settings')
     expect(() => settingsItem?.click?.()).not.toThrow()
     expect(error).toHaveBeenCalledWith('[system-tray] menu action failed', expect.any(Error))
+  })
+})
+
+describe('language changes', () => {
+  it.each(['darwin', 'win32'] as const)(
+    'refreshes the existing %s menu and keeps its actions',
+    async (platform) => {
+      setPlatform(platform)
+      const { createSystemTray, rebuildSystemTrayMenu } = await loadModule()
+      const { setMainUiLanguage } = await import('../i18n/main-i18n')
+      await setMainUiLanguage('en')
+      const options = { ...createOptions(), onQuitAndStopAllSessions: vi.fn() }
+      createSystemTray(options)
+      expect(builtMenuItems()[0].label).toBe('Open Dark Factory')
+
+      await setMainUiLanguage('ja')
+      rebuildSystemTrayMenu()
+      expect(builtMenuItems()[0].label).toBe('Open Dark Factory')
+      flushTraySceneMutation()
+
+      expect(trayInstances).toHaveLength(1)
+      expect(trayInstances[0].setContextMenu).toHaveBeenCalledTimes(2)
+      expect(builtMenuItems()[0].label).toBe('Orca を開く')
+      expect(builtMenuItems().at(-2)?.label).toBe('完全に終了…')
+      expect(builtMenuItems().at(-1)?.label).toBe('終了')
+      builtMenuItems()[0].click?.()
+      builtMenuItems().at(-2)?.click?.()
+      builtMenuItems().at(-1)?.click?.()
+      expect(options.onOpen).toHaveBeenCalledOnce()
+      expect(options.onQuitAndStopAllSessions).toHaveBeenCalledOnce()
+      expect(options.onQuit).toHaveBeenCalledOnce()
+      if (platform === 'darwin') {
+        expect(builtMenuItems()[2].label).toBe('設定')
+        expect(builtMenuItems()[3].label).toBe('アップデートを確認…')
+        builtMenuItems()[2].click?.()
+        builtMenuItems()[3].click?.()
+        expect(options.onOpenSettings).toHaveBeenCalledOnce()
+        expect(options.onCheckForUpdates).toHaveBeenCalledOnce()
+        expect(nativeThemeMock.on).toHaveBeenCalledTimes(1)
+      } else {
+        expect(trayInstances[0].on).toHaveBeenCalledTimes(1)
+      }
+    }
+  )
+
+  it('refreshes the attention tooltip and replacements in the active language catalog', async () => {
+    setPlatform('darwin')
+    const { createSystemTray, rebuildSystemTrayMenu, setTrayAttention } = await loadModule()
+    const { mainI18n, setMainUiLanguage } = await import('../i18n/main-i18n')
+    await setMainUiLanguage('en')
+    createSystemTray(createOptions({ isDevInstance: true, devInstanceLabel: 'language-test' }))
+    setTrayAttention(true)
+    flushTraySceneMutation()
+    await setMainUiLanguage('ja')
+    rebuildSystemTrayMenu()
+    flushTraySceneMutation()
+    expect(trayInstances[0].setToolTip).toHaveBeenLastCalledWith(
+      'Dark Factory DEV (language-test) - 件のアクティビティが待機中'
+    )
+    expect(builtMenuItems()[0].label).toBe('Dark Factory DEV (language-test)')
+    expect(composeAttentionMock).toHaveBeenCalled()
+
+    mainI18n.addResource('ja', 'translation', 'tray.openOrca', 'Orca を表示')
+    rebuildSystemTrayMenu()
+    flushTraySceneMutation()
+    expect(builtMenuItems()[2].label).toBe('Orca を表示')
+  })
+
+  it('does nothing without a tray or when destroyed before the deferred refresh', async () => {
+    setPlatform('darwin')
+    const { createSystemTray, destroySystemTray, rebuildSystemTrayMenu } = await loadModule()
+    rebuildSystemTrayMenu()
+    flushTraySceneMutation()
+    expect(menuFromTemplateMock).not.toHaveBeenCalled()
+    createSystemTray(createOptions())
+    rebuildSystemTrayMenu()
+    destroySystemTray()
+    menuFromTemplateMock.mockClear()
+    flushTraySceneMutation()
+    expect(menuFromTemplateMock).not.toHaveBeenCalled()
   })
 })

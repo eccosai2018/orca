@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { hasVisibleOverlay } from '@/lib/visible-overlay'
 import type { AutomationsPageLocalState } from './use-automations-page-local-state'
 import type { AutomationsPageStoreState } from './use-automations-page-store-state'
+import { addAppKeyListener, removeAppKeyListener } from '@/lib/app-keyboard-router'
 
 export function useAutomationsPageEscape({
   store,
@@ -10,18 +11,19 @@ export function useAutomationsPageEscape({
   store: AutomationsPageStoreState
   local: AutomationsPageLocalState
 }): void {
-  const { activeModal, closeAutomationsPage } = store
+  const { activeModal, closeAutomationsPage, setPendingAutomationRunNavigation } = store
   const {
     createOpen,
     deleteTarget,
     externalDeleteTarget,
     isDetailOpen,
     selectedAutomationRunPageId,
-    selectedExternalRunPage,
+    pageView,
+    runPageOrigin,
+    setPageView,
     setActivePaneTab,
     setIsDetailOpen,
-    setSelectedAutomationRunPageId,
-    setSelectedExternalRunPage
+    setSelectedAutomationRunPageId
   } = local
   useEffect(() => {
     if (createOpen || deleteTarget || externalDeleteTarget || activeModal !== 'none') {
@@ -61,12 +63,18 @@ export function useAutomationsPageEscape({
         }
       }
 
+      if (pageView === 'run') {
+        event.preventDefault()
+        setPendingAutomationRunNavigation(null)
+        setSelectedAutomationRunPageId(null)
+        setPageView(runPageOrigin === 'automation' ? 'automations' : 'runs')
+        setIsDetailOpen(runPageOrigin === 'automation')
+        setActivePaneTab(runPageOrigin === 'automation' ? 'runs' : 'overview')
+        return
+      }
+
       if (isDetailOpen) {
         event.preventDefault()
-        if (selectedExternalRunPage) {
-          setSelectedExternalRunPage(null)
-          return
-        }
         if (selectedAutomationRunPageId) {
           setSelectedAutomationRunPageId(null)
           return
@@ -76,12 +84,18 @@ export function useAutomationsPageEscape({
         return
       }
 
+      if (pageView === 'runs') {
+        event.preventDefault()
+        setPageView('automations')
+        return
+      }
+
       event.preventDefault()
       closeAutomationsPage()
     }
 
-    window.addEventListener('keydown', onKeyDown, { capture: true })
-    return () => window.removeEventListener('keydown', onKeyDown, { capture: true })
+    addAppKeyListener('keydown', onKeyDown)
+    return () => removeAppKeyListener('keydown', onKeyDown)
   }, [
     activeModal,
     closeAutomationsPage,
@@ -89,11 +103,13 @@ export function useAutomationsPageEscape({
     deleteTarget,
     externalDeleteTarget,
     isDetailOpen,
+    pageView,
+    runPageOrigin,
     selectedAutomationRunPageId,
-    selectedExternalRunPage,
     setActivePaneTab,
     setIsDetailOpen,
     setSelectedAutomationRunPageId,
-    setSelectedExternalRunPage
+    setPendingAutomationRunNavigation,
+    setPageView
   ])
 }

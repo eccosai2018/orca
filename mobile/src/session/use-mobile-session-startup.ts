@@ -1,8 +1,10 @@
 import { useEffect } from 'react'
-import type { RpcSuccess } from '../transport/types'
+import { translate } from '../i18n/mobile-i18n'
+import { worktreeActivate } from '../host-screen/host-screen-operations'
 import { headlessActivationNeedsHostRenderer } from '../worktree/worktree-activation-result'
 import { createInitialSessionAutoCreateState } from './use-initial-session-terminal-autocreate'
 import type { MobileSessionKeyboardStateModel } from './use-mobile-session-keyboard-state'
+import type { RpcResponse } from '../transport/types'
 
 export function useMobileSessionStartup(scope: MobileSessionKeyboardStateModel) {
   const {
@@ -30,9 +32,8 @@ export function useMobileSessionStartup(scope: MobileSessionKeyboardStateModel) 
     terminalDiagnosticsRef,
     activeHandleRef,
     activeSessionTabTypeRef,
-    pendingActiveSessionTabIdRef,
+    pendingSelectionRef,
     selectedSessionTabIdRef,
-    pendingActiveTerminalHandleRef,
     pendingBrowserFocusPageIdRef,
     pendingTerminalActivationAttemptRef,
     initialSessionAutoCreateRef,
@@ -41,20 +42,23 @@ export function useMobileSessionStartup(scope: MobileSessionKeyboardStateModel) 
     clearDelayedActionTimers,
     showToast,
     clearTerminalCache,
+    setSplitTerminalHandles,
+    terminalPaneViewportsRef,
     fetchTerminals,
     ensureSessionTabs
   } = scope
   useEffect(() => {
-    // Why: Expo reuses this screen across worktrees; reset route state so it can't open stale UI or reject the next snapshot.
+    // Reset reused-route state so the next workspace cannot inherit stale UI or snapshot gates.
     sessionTabActionSheetRequestSeqRef.current += 1
     sessionTabActionSheetKeyboardHideSubRef.current?.remove()
     sessionTabActionSheetKeyboardHideSubRef.current = null
     clearTerminalCache()
+    setSplitTerminalHandles(null)
+    terminalPaneViewportsRef.current.clear()
     activeHandleRef.current = null
     activeSessionTabTypeRef.current = null
-    pendingActiveSessionTabIdRef.current = null
+    pendingSelectionRef.current = null
     selectedSessionTabIdRef.current = null
-    pendingActiveTerminalHandleRef.current = null
     pendingBrowserFocusPageIdRef.current = null
     pendingTerminalActivationAttemptRef.current = null
     initialSessionAutoCreateRef.current = createInitialSessionAutoCreateState()
@@ -90,6 +94,8 @@ export function useMobileSessionStartup(scope: MobileSessionKeyboardStateModel) 
     clearPendingLiveInputCommit,
     bufferedTerminalDraftState.clearPendingRestorations,
     clearTerminalCache,
+    setSplitTerminalHandles,
+    terminalPaneViewportsRef,
     hostId,
     bufferedTerminalDraftState.resetDrafts,
     worktreeId
@@ -101,11 +107,11 @@ export function useMobileSessionStartup(scope: MobileSessionKeyboardStateModel) 
     if (connState !== 'connected') {
       return
     }
-    // Why: keep the current xterm visible while the reconnect snapshot hydrates, not a blank "Loading terminals" surface.
+    // Keep xterm visible while reconnect history hydrates.
     if (initializedHandlesRef.current.size === 0) {
       setTerminalsLoaded(false)
     }
-    // Why: clear the initialized flag so the reconnect scrollback replaces stale content instead of being dropped.
+    // Clear initialization so reconnect scrollback replaces stale content instead of being ignored.
     initializedHandlesRef.current.clear()
     let disposed = false
     const timers: ReturnType<typeof setTimeout>[] = []
@@ -116,20 +122,32 @@ export function useMobileSessionStartup(scope: MobileSessionKeyboardStateModel) 
       timers.push(setTimeout(fn, ms))
     }
     void (async () => {
-      const reportActivationOutcome = (response: RpcSuccess | null): void => {
-        if (!disposed && response && headlessActivationNeedsHostRenderer(response.result)) {
-          showToast('Open Orca on the host to wake sleeping agents.', 3000)
+      // Interpret only actual replies; preserve absent activation replies as null rather than inventing refusals.
+      const reportActivationOutcome = (response: RpcResponse | null): void => {
+        const activation = response === null ? null : worktreeActivate.interpret(response)
+        if (
+          !disposed &&
+          activation?.accepted === true &&
+          headlessActivationNeedsHostRenderer(activation.value)
+        ) {
+          showToast(
+            translate(
+              'session.useStartup.wakeAgents',
+              'Open Orca on the host to wake sleeping agents.'
+            ),
+            3000
+          )
         }
       }
       if (client && created !== '1' && !isFloatingWorkspaceRoute) {
-        // Why: hydrate host-owned tabs without pulling other paired clients (esp. desktop) into this worktree.
-        void client
-          .sendRequest('worktree.activate', {
+        // Hydrate tabs without navigating other paired clients into this workspace.
+        void worktreeActivate
+          .request(client, {
             worktree: `id:${worktreeId}`,
             notifyClients: false,
             navigation: 'caller'
           })
-          .then((response) => reportActivationOutcome(response.ok ? response : null))
+          .then(reportActivationOutcome)
           .catch(() => null)
       }
       if (disposed) {
@@ -151,14 +169,14 @@ export function useMobileSessionStartup(scope: MobileSessionKeyboardStateModel) 
             return
           }
           void (async () => {
-            const activationResponse = await client
-              .sendRequest('worktree.activate', {
+            const activationResponse = await worktreeActivate
+              .request(client, {
                 worktree: `id:${worktreeId}`,
                 notifyClients: false,
                 navigation: 'caller'
               })
               .catch(() => null)
-            reportActivationOutcome(activationResponse?.ok ? activationResponse : null)
+            reportActivationOutcome(activationResponse)
             if (disposed) {
               return
             }

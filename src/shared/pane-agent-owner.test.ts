@@ -15,11 +15,8 @@ describe('resolvePaneAgentOwner', () => {
   })
 
   it('falls through to the durable host-stamped hook identity when launch intent is gone', () => {
-    // The mirror/restore case: launchAgent dropped, live hook is the anchor.
     expect(resolvePaneAgentOwner({ hookAgent: 'omp' })).toBe('omp')
-    // Live hook cleared: the last completed hook carries the identity.
     expect(resolvePaneAgentOwner({ completedHookAgent: 'omp' })).toBe('omp')
-    // Nothing live at all: the hibernated session record is the last resort.
     expect(resolvePaneAgentOwner({ sleepingSessionAgent: 'omp' })).toBe('omp')
   })
 
@@ -35,6 +32,42 @@ describe('resolvePaneAgentOwner', () => {
     expect(
       resolvePaneAgentOwner({ completedHookAgent: 'omp', siblingCompletedHookAgent: 'pi' })
     ).toBe('omp')
+  })
+
+  it('preserves the pre-tranche precedence for every conflicting owner tier', () => {
+    expect(
+      resolvePaneAgentOwnerRecord({
+        launchAgent: 'claude',
+        hookAgent: 'codex',
+        siblingHookAgent: 'gemini',
+        completedHookAgent: 'pi',
+        sleepingSessionAgent: 'omp'
+      })
+    ).toEqual({ agent: 'claude', ownerIsLaunch: true })
+    expect(
+      resolvePaneAgentOwnerRecord({
+        hookAgent: 'claude',
+        siblingHookAgent: 'codex',
+        completedHookAgent: 'gemini',
+        siblingCompletedHookAgent: 'pi',
+        sleepingSessionAgent: 'omp'
+      })
+    ).toEqual({ agent: 'claude', ownerIsLaunch: false })
+    expect(
+      resolvePaneAgentOwnerRecord({
+        siblingHookAgent: 'codex',
+        completedHookAgent: 'claude',
+        siblingCompletedHookAgent: 'gemini',
+        sleepingSessionAgent: 'omp'
+      })
+    ).toEqual({ agent: 'codex', ownerIsLaunch: false })
+    expect(
+      resolvePaneAgentOwnerRecord({
+        completedHookAgent: 'claude',
+        siblingCompletedHookAgent: 'codex',
+        sleepingSessionAgent: 'gemini'
+      })
+    ).toEqual({ agent: 'claude', ownerIsLaunch: false })
   })
 
   it('returns null when no owner evidence exists', () => {

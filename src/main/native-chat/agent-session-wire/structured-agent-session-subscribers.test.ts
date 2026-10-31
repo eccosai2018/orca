@@ -1,102 +1,143 @@
-import { appendFile, mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { AGENT_SESSION_JOURNAL_SCHEMA_VERSION } from '../../../shared/agent-session-journal-types'
+import { expect, it, vi } from 'vitest'
+import { AGENT_JOURNAL_THREAD_SCOPE } from '../../../shared/agent-session-journal-types'
 import type {
-  AgentSessionHandoffStatus,
+  AgentSessionBackgroundTaskState,
   AgentSessionSubscribeEvent
 } from '../../../shared/agent-session-wire'
-import {
-  REMOTE_RUNTIME_MAX_OUTBOUND_JSON_BYTES,
-  serializeRemoteRuntimePayload
-} from '../../../shared/remote-runtime-memory-limits'
-import { JOURNAL_LOG_FILE } from '../agent-session-journal/journal-log-file'
-import { serializeJournalRow, type JournalRow } from '../agent-session-journal/journal-row-schema'
-import { openAgentSessionJournal } from '../agent-session-journal/journal-store-factory'
+import { StructuredAgentSessionCurrentWork } from './structured-agent-session-current-work'
+import { StructuredAgentSessionJournalProjections } from './structured-agent-session-status-journal-projection'
+import { MAX_RETAINED_SESSION_ACTIVITIES } from './structured-agent-session-activity-retention'
 import { AgentSessionSubscribers } from './structured-agent-session-subscribers'
+import { codexProviderHandle } from '../../../shared/agent-session-provider-handle-encoding'
+import * as journalReducer from '../agent-session-journal/journal-reducer'
 
-const SESSION = 'subscriber-session'
+import {
+  fixture,
+  SESSION,
+  journals
+} from './structured-agent-session-subscriber-contract-test-fixture'
 
-let root: string
-
-beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), 'orca-agent-subscribers-'))
-})
-
-afterEach(async () => {
-  await rm(root, { recursive: true, force: true })
-})
-
-describe('AgentSessionSubscribers', () => {
-  it('publishes the current fence when a resumed cursor is already caught up', async () => {
-    const journal = await openAgentSessionJournal({
-      identity: {
-        sessionId: SESSION,
-        workspaceId: 'workspace-1',
-        hostId: 'local',
-        agent: 'codex',
-        providerHandle: { kind: 'codex', threadId: 'thread-1' }
-      },
-      journalDir: join(root, 'checkpoint-journal')
-    })
-    const events: AgentSessionSubscribeEvent[] = []
-
-    new AgentSessionSubscribers().open({
-      id: 'subscriber-1',
-      sessionId: SESSION,
-      journal,
-      fence: 7,
-      cursor: journal.cursor(),
-      emit: (event) => events.push(event)
-    })
-
-    expect(events).toEqual([
-      {
-        type: 'batch',
-        sessionId: SESSION,
-        batch: {
-          cursor: journal.cursor(),
-          items: [],
-          removedItemIds: [],
-          submissions: []
-        },
-        fence: 7
+it('renders history once per source for N/10N items and one/three readers', async () => {
+  const render = vi.spyOn(journalReducer, 'renderJournalState')
+  try {
+    for (const size of [100, 1000]) {
+      for (const readers of [1, 3]) {
+        const journal = await journals.open({
+          identity: {
+            sessionId: SESSION,
+            workspaceId: 'workspace-1',
+            hostId: 'local',
+            agent: 'codex',
+            providerHandle: codexProviderHandle('thread-1')
+          },
+          stateDirectory: join(fixture.root, `${size}-${readers}`)
+        })
+        const options = { fence: 1, turnScope: AGENT_JOURNAL_THREAD_SCOPE }
+        const identity = (ordinal: number) => ({
+          provider: 'codex' as const,
+          threadId: 'thread-1',
+          turnId: 'turn',
+          ordinal
+        })
+        const body = (text: string) => ({
+          kind: 'message' as const,
+          role: 'assistant' as const,
+          blocks: [{ type: 'text' as const, text }]
+        })
+        for (let index = 0; index < size; index++) {
+          await journal.appendItem(identity(index), body('initial'), options)
+        }
+        const projections = new StructuredAgentSessionJournalProjections()
+        const events: AgentSessionSubscribeEvent[] = []
+        const subscribers = new AgentSessionSubscribers({
+          readCurrentWork: () => new StructuredAgentSessionCurrentWork(journal, 1, 0),
+          onJournalPublished: () => {
+            projections.read(journal, null)
+          }
+        })
+        for (let index = 0; index < readers; index++) {
+          subscribers.open({
+            id: String(index),
+            sessionId: SESSION,
+            journal,
+            fence: 1,
+            boundedFrames: index === 1,
+            emit: (event) => events.push(event)
+          })
+        }
+        subscribers.publish(SESSION, journal)
+        for (const text of ['streamed', 'newer']) {
+          const prior = journal.snapshot()
+          await journal.appendItem(identity(size - 1), body(text), options)
+          render.mockClear()
+          events.length = 0
+          subscribers.publish(SESSION, journal)
+          expect(render).toHaveBeenCalledTimes(1)
+          const current = journal.snapshot()
+          expect(current).not.toBe(prior)
+          expect(current.items).toHaveLength(size)
+          expect(current.items.at(-1)?.body).toEqual(body(text))
+          expect(journal.publicRead().snapshot).toBe(current)
+          expect(events.filter((event) => event.type === 'batch')).toHaveLength(readers)
+          expect(
+            events
+              .flatMap((event) => (event.type === 'batch' ? event.batch.items : []))
+              .map((item) => item.body)
+          ).toEqual(Array.from({ length: readers }, () => body(text)))
+          expect(render).toHaveBeenCalledTimes(1)
+        }
       }
-    ])
+    }
+  } finally {
+    render.mockRestore()
+  }
+})
+
+it('bounds retained turn activity across session churn', async () => {
+  const journal = await journals.open({
+    identity: {
+      sessionId: SESSION,
+      workspaceId: 'workspace-1',
+      hostId: 'local',
+      agent: 'codex',
+      providerHandle: codexProviderHandle('thread-1')
+    },
+    stateDirectory: join(fixture.root, 'activity-churn-journal')
+  })
+  const subscribers = new AgentSessionSubscribers()
+
+  for (let index = 0; index < MAX_RETAINED_SESSION_ACTIVITIES + 4; index += 1) {
+    subscribers.publish(`session-${index}`, journal, { turnId: `turn-${index}`, text: 'working' })
+  }
+
+  expect(subscribers.retainedActivityCountForTests).toBe(MAX_RETAINED_SESSION_ACTIVITIES)
+})
+
+it('publishes the current fence when a resumed cursor is already caught up', async () => {
+  const journal = await journals.open({
+    identity: {
+      sessionId: SESSION,
+      workspaceId: 'workspace-1',
+      hostId: 'local',
+      agent: 'codex',
+      providerHandle: codexProviderHandle('thread-1')
+    },
+    stateDirectory: join(fixture.root, 'checkpoint-journal')
+  })
+  const events: AgentSessionSubscribeEvent[] = []
+
+  new AgentSessionSubscribers().open({
+    id: 'subscriber-1',
+    sessionId: SESSION,
+    journal,
+    fence: 7,
+    cursor: journal.cursor(),
+    emit: (event) => events.push(event)
   })
 
-  it('publishes handoff-only changes without serializing a transcript snapshot', async () => {
-    const journal = await openAgentSessionJournal({
-      identity: {
-        sessionId: SESSION,
-        workspaceId: 'workspace-1',
-        hostId: 'local',
-        agent: 'codex',
-        providerHandle: { kind: 'codex', threadId: 'thread-1' }
-      },
-      journalDir: join(root, 'journal')
-    })
-    const subscribers = new AgentSessionSubscribers()
-    const events: AgentSessionSubscribeEvent[] = []
-    subscribers.open({
-      id: 'subscriber-1',
-      sessionId: SESSION,
-      journal,
-      fence: 1,
-      emit: (event) => events.push(event)
-    })
-    const handoff: AgentSessionHandoffStatus = {
-      owner: 'native',
-      direction: 'to-tui',
-      phase: 'switching',
-      stage: 'preparing',
-      operationId: 'handoff-1'
-    }
-
-    subscribers.handoff(SESSION, 2, handoff)
-
-    expect(events.at(-1)).toEqual({
+  expect(events).toEqual([
+    {
       type: 'batch',
       sessionId: SESSION,
       batch: {
@@ -105,91 +146,105 @@ describe('AgentSessionSubscribers', () => {
         removedItemIds: [],
         submissions: []
       },
-      fence: 2,
-      handoff
-    })
-  })
-
-  it('catches a subscriber up past a pre-existing unsendable removal with a bounded reset', async () => {
-    const journalDir = join(root, 'oversized-removal-journal')
-    const seeded = await openAgentSessionJournal({
-      identity: {
-        sessionId: SESSION,
-        workspaceId: 'workspace-1',
-        hostId: 'local',
-        agent: 'codex',
-        providerHandle: { kind: 'codex', threadId: 'thread-1' }
-      },
-      journalDir
-    })
-    // A row admitted before identity bounding: its removal id alone exceeds
-    // the outbound cap, so no catch-up batch can ever carry it.
-    const hugeItemId = `codex:thread-1:${'h'.repeat(5 * 1024 * 1024)}:1`
-    const resumeCursor = seeded.cursor()
-    const seq = resumeCursor.sequence
-    const rows: JournalRow[] = [
-      {
-        kind: 'item',
-        itemId: hugeItemId,
-        revision: 1,
-        body: { kind: 'message', role: 'assistant', blocks: [{ type: 'text', text: 'big' }] },
-        v: AGENT_SESSION_JOURNAL_SCHEMA_VERSION,
-        epoch: seeded.epoch,
-        seq: seq + 1,
-        fence: 1,
-        ts: 2_000
-      },
-      {
-        kind: 'tombstone',
-        itemId: hugeItemId,
-        revision: 2,
-        v: AGENT_SESSION_JOURNAL_SCHEMA_VERSION,
-        epoch: seeded.epoch,
-        seq: seq + 2,
-        fence: 1,
-        ts: 2_001
-      }
-    ]
-    await appendFile(
-      join(journalDir, JOURNAL_LOG_FILE),
-      `${rows.map(serializeJournalRow).join('\n')}\n`,
-      'utf-8'
-    )
-    const journal = await openAgentSessionJournal({
-      identity: {
-        sessionId: SESSION,
-        workspaceId: 'workspace-1',
-        hostId: 'local',
-        agent: 'codex',
-        providerHandle: { kind: 'codex', threadId: 'thread-1' }
-      },
-      journalDir
-    })
-
-    const subscribers = new AgentSessionSubscribers()
-    const events: AgentSessionSubscribeEvent[] = []
-    subscribers.open({
-      id: 'subscriber-1',
-      sessionId: SESSION,
-      journal,
-      fence: 1,
-      cursor: resumeCursor,
-      emit: (event) => events.push(event)
-    })
-
-    // Every event a remote subscriber receives must fit the outbound channel.
-    for (const event of events) {
-      expect(Buffer.byteLength(serializeRemoteRuntimePayload(event), 'utf8')).toBeLessThanOrEqual(
-        REMOTE_RUNTIME_MAX_OUTBOUND_JSON_BYTES
-      )
+      fence: 7,
+      hostNow: expect.any(Number),
+      activity: null
     }
-    const reset = events.find((event) => event.type === 'reset')
-    expect(reset).toBeDefined()
+  ])
+})
 
-    // Forward progress: the reset advanced the subscriber past the unsendable
-    // row, so the next publish has nothing stale to re-deliver.
-    const settled = events.length
-    subscribers.publish(SESSION, journal)
-    expect(events.slice(settled).filter((event) => event.type === 'reset')).toEqual([])
+it('stamps the host clock once per published frame', async () => {
+  const journal = await journals.open({
+    identity: {
+      sessionId: SESSION,
+      workspaceId: 'workspace-1',
+      hostId: 'local',
+      agent: 'codex',
+      providerHandle: codexProviderHandle('thread-1')
+    },
+    stateDirectory: join(fixture.root, 'clock-journal')
   })
+  let now = 1_000
+  let roster: AgentSessionBackgroundTaskState | null = null
+  const events: AgentSessionSubscribeEvent[] = []
+  const subscribers = new AgentSessionSubscribers({
+    now: () => (now += 1),
+    readBackgroundTasks: () => roster
+  })
+  const emit = (event: AgentSessionSubscribeEvent): void => {
+    events.push(event)
+  }
+  subscribers.open({ id: 'one', sessionId: SESSION, journal, fence: 1, emit })
+  subscribers.open({ id: 'two', sessionId: SESSION, journal, fence: 1, emit })
+  await journal.appendItem(
+    { provider: 'orca', clientMessageId: 'clocked' },
+    { kind: 'status', text: 'Clocked' },
+    { fence: 1, turnScope: AGENT_JOURNAL_THREAD_SCOPE }
+  )
+  subscribers.publish(SESSION, journal)
+  roster = {
+    state: 'monitoring',
+    tasks: [{ id: 'task-1', kind: 'command', description: 'run the build' }]
+  }
+  subscribers.republishBackgroundTasks(SESSION, 1)
+  subscribers.snapshot(SESSION, journal, 1)
+
+  expect(events.map((event) => ('hostNow' in event ? event.hostNow : null))).toEqual([
+    1_001, 1_002,
+    // Both subscribers of one publication read the same clock sample.
+    1_003, 1_003, 1_004, 1_004, 1_005, 1_005
+  ])
+  expect(events.map((event) => event.type)).toEqual([
+    'snapshot',
+    'snapshot',
+    'batch',
+    'batch',
+    'batch',
+    'batch',
+    'snapshot',
+    'snapshot'
+  ])
+})
+
+it('includes catalogs on reconnect and sends an idle checkpoint without journal work', async () => {
+  const journal = await journals.open({
+    identity: {
+      sessionId: SESSION,
+      workspaceId: 'workspace-1',
+      hostId: 'local',
+      agent: 'codex',
+      providerHandle: codexProviderHandle('thread-1')
+    },
+    stateDirectory: join(fixture.root, 'catalog-journal')
+  })
+  let commands = [{ name: 'first', kind: 'skill' as const }]
+  const events: AgentSessionSubscribeEvent[] = []
+  const subscribers = new AgentSessionSubscribers({ readCommands: () => commands })
+  subscribers.open({
+    id: 'one',
+    sessionId: SESSION,
+    journal,
+    fence: 7,
+    emit: (event) => events.push(event)
+  })
+  expect(events[0]).toMatchObject({ type: 'snapshot', commands })
+  commands = [{ name: 'second', kind: 'skill' as const }]
+  subscribers.publish(SESSION, journal)
+  expect(events[1]).toEqual({
+    type: 'batch',
+    sessionId: SESSION,
+    fence: 7,
+    hostNow: expect.any(Number),
+    commands,
+    batch: { cursor: journal.cursor(), items: [], removedItemIds: [], submissions: [] }
+  })
+  subscribers.open({
+    id: 'two',
+    sessionId: SESSION,
+    journal,
+    cursor: journal.cursor(),
+    fence: 7,
+    emit: (event) => events.push(event)
+  })
+  expect(events[2]).toMatchObject({ type: 'batch', commands })
 })

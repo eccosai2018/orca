@@ -1,12 +1,21 @@
 import type { CommandHandler } from '../../dispatch'
 import { getOptionalStringFlag } from '../../flags'
-import { RuntimeClientError } from '../../runtime-client'
+import { printResult } from '../../format'
+import { renderCommand } from '../../orchestration-mutation-recovery'
+import { RuntimeClientError, type RuntimeClient } from '../../runtime-client'
+import type { RuntimeStatus } from '../../../shared/runtime-types'
+import { ORCHESTRATION_ASK_RETURNS_AT_ONCE_RUNTIME_CAPABILITY } from '../../../shared/protocol-version'
+import { resolveOrchestrationCliExecutable } from '../../runtime/orchestration-recovery-command'
 import {
   clampOrchestrationAskTimeoutMs,
+  ORCHESTRATION_ASK_MAX_TIMEOUT_MS,
   resolveOrchestrationAskClientTimeoutMs
 } from '../../../shared/orchestration-ask-timeout'
 import type { LegacyCompatibilityResult } from '../../../shared/orchestration-check-output'
 import { callOrchestrationMutation } from './mutation-request'
+import { withReceiptNext } from './receipt-next-text'
+import { askView, type AskResult } from './ask-agent-view'
+import { printOrchestrationResult } from './agent-view'
 import { getOptionalPositiveIntegerValueFlag } from './numeric-flags'
 import {
   flushOrchestrationStdout,
@@ -15,9 +24,20 @@ import {
 } from './runtime-compatibility'
 import { resolveOrchestrationTerminalHandle } from './terminal-identity'
 
+async function runtimeLacksAskAtOnce(client: RuntimeClient): Promise<boolean> {
+  const status = await client.call<RuntimeStatus>('status.get')
+  return !status.result.capabilities?.includes(ORCHESTRATION_ASK_RETURNS_AT_ONCE_RUNTIME_CAPABILITY)
+}
+
 export const ORCHESTRATION_QUESTION_HANDLER: Record<string, CommandHandler> = {
   'orchestration ask': async ({ flags, client, cwd, json }) => {
     const parsedTimeoutMs = getOptionalPositiveIntegerValueFlag(flags, 'timeout-ms')
+    if (parsedTimeoutMs !== undefined && parsedTimeoutMs > ORCHESTRATION_ASK_MAX_TIMEOUT_MS) {
+      throw new RuntimeClientError(
+        'invalid_argument',
+        `--timeout-ms must be at most ${ORCHESTRATION_ASK_MAX_TIMEOUT_MS} (30 minutes) per wait. For longer waits, resume the same question after a timeout.`
+      )
+    }
     const timeoutMs = clampOrchestrationAskTimeoutMs(parsedTimeoutMs)
     const from = await resolveOrchestrationTerminalHandle(flags, cwd, client, 'from')
     const question = getOptionalStringFlag(flags, 'question')
@@ -34,6 +54,11 @@ export const ORCHESTRATION_QUESTION_HANDLER: Record<string, CommandHandler> = {
         '--options is only valid when creating a new question.'
       )
     }
+    // Only a new question returns at once, and only from an Orca that can; resume and --wait still wait.
+    const wait =
+      resume !== undefined ||
+      flags.has('wait') ||
+      (await runtimeLacksAskAtOnce(client).catch(() => true))
     const result = await callOrchestrationMutation<{
       answer: string | null
       messageId: string | null
@@ -43,6 +68,8 @@ export const ORCHESTRATION_QUESTION_HANDLER: Record<string, CommandHandler> = {
       cancelled?: boolean
       connectionLost?: boolean
       answerMessageId?: string | null
+      pending?: boolean
+      next?: string
       legacyCompatibility?: LegacyCompatibilityResult
     }>(
       client,
@@ -55,19 +82,34 @@ export const ORCHESTRATION_QUESTION_HANDLER: Record<string, CommandHandler> = {
         resume,
         options: getOptionalStringFlag(flags, 'options'),
         timeoutMs: parsedTimeoutMs === undefined ? undefined : timeoutMs,
+        ...(wait ? {} : { wait: false }),
         from,
         compatibilityCliCommand: resolveCompatibilityCliCommand(),
         compatibilityWindowsCommand: resolvePackagedWindowsCompatibilityCommand()
       },
-      // Why: extend past timeoutMs so transport does not abort before the runtime resolves its timeout.
+      // Outlive the server timeout so its result arrives before the transport aborts.
       {
         timeoutMs: resolveOrchestrationAskClientTimeoutMs(parsedTimeoutMs),
         orchestrationCapability: getOptionalStringFlag(flags, 'dispatch-capability')
       }
     )
-    // Why: ask JSON is intentionally a bare object for `jq -r .answer`, unlike other verbs.
+    if (!flags.has('full')) {
+      printOrchestrationResult(
+        result,
+        json,
+        askView({
+          from,
+          dispatchCapability: getOptionalStringFlag(flags, 'dispatch-capability'),
+          timeoutMs
+        })
+      )
+      await finishLegacyAsk(client, from, result.result)
+      return
+    }
     if (json) {
-      console.log(JSON.stringify(result.result))
+      printResult(result, true, () => '')
+    } else if (result.result.pending) {
+      console.log(withReceiptNext(`Question ${result.result.messageId} sent.`, result.result))
     } else if (result.result.legacyCompatibility?.resumeRequired) {
       console.log(`Question ${result.result.messageId} committed.`)
       console.log(`Resume with: ${result.result.legacyCompatibility.resumeCommand}`)
@@ -89,9 +131,30 @@ export const ORCHESTRATION_QUESTION_HANDLER: Record<string, CommandHandler> = {
     }
     if (result.result.timedOut) {
       if (!json) {
-        // Why: report the server's clamped effective budget rather than overstating the wait.
+        // Report the server's effective budget, which may be clamped below the requested timeout.
         const waitedMs = result.result.timeoutMs ?? timeoutMs
-        console.error(`ask timeout after ${waitedMs}ms (thread ${result.result.threadId})`)
+        const messageId = result.result.messageId
+        const dispatchCapability = getOptionalStringFlag(flags, 'dispatch-capability')
+        const resumeCommand =
+          messageId === null
+            ? undefined
+            : renderCommand([
+                resolveOrchestrationCliExecutable(),
+                'orchestration',
+                'ask',
+                // A session's resume is flagless: its injected id names it again.
+                ...(from ? ['--from', from] : []),
+                ...(dispatchCapability ? ['--dispatch-capability', dispatchCapability] : []),
+                '--resume',
+                messageId,
+                '--timeout-ms',
+                String(waitedMs)
+              ])
+        console.error(
+          resumeCommand
+            ? `ask timeout after ${waitedMs}ms; question is still pending (messageId: ${messageId}). Resume waiting; do not ask again:\n${resumeCommand}`
+            : `ask timeout after ${waitedMs}ms; question identity was not returned, so it cannot be resumed safely.`
+        )
       }
       process.exitCode = 1
     }
@@ -105,5 +168,25 @@ export const ORCHESTRATION_QUESTION_HANDLER: Record<string, CommandHandler> = {
       }
       process.exitCode = 1
     }
+  }
+}
+
+// Legacy hosts need stdout flushed before exit 75, and the answer acknowledged once printed.
+async function finishLegacyAsk(
+  client: RuntimeClient,
+  from: string | undefined,
+  value: AskResult
+): Promise<void> {
+  const legacy = value.legacyCompatibility
+  const answerAck =
+    !legacy?.resumeRequired && value.answer !== null ? legacy?.answerAcknowledgement : undefined
+  if (legacy?.resumeRequired || answerAck) {
+    await flushOrchestrationStdout()
+  }
+  if (answerAck) {
+    await client.call('orchestration.check', {
+      terminal: from,
+      compatibilityQuestionAck: JSON.stringify(answerAck)
+    })
   }
 }

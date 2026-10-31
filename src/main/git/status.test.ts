@@ -66,16 +66,18 @@ describe('getStatus', () => {
     readFileMock.mockReset()
     accessMock.mockReset()
     accessMock.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }))
-    // Why: untracked line counting stats a file before reading it; any
-    // under-limit size routes the read to readFileMock.
     statMock.mockReset()
     statMock.mockResolvedValue({ isFile: () => true, size: 12 })
-    // Why: after the status call, getStatus may issue `git diff --numstat`
-    // calls to attach per-entry line counts. Tests that don't care about counts
-    // set only a `mockResolvedValueOnce` for the status output; this default
-    // keeps those follow-up numstat calls from returning undefined.
+    // Supply empty numstat results after tests' one-shot status responses.
     gitExecFileAsyncMock.mockResolvedValue({ stdout: '' })
   })
+
+  /** `access` targets outside the git dir — i.e. working-tree probes, not conflict-marker reads. */
+  function conflictFileProbes(): string[] {
+    return accessMock.mock.calls
+      .map(([target]) => String(target).replaceAll('\\', '/'))
+      .filter((target) => !target.includes('/.git/'))
+  }
 
   it('parses unmerged porcelain v2 entries into unresolved conflict rows', async () => {
     readFileMock.mockResolvedValue('gitdir: /repo/.git/worktrees/feature\n')
@@ -104,11 +106,12 @@ describe('getStatus', () => {
     ])
   })
 
-  it('maps deleted conflicts to deleted when the working tree file is absent', async () => {
+  // The 7th field of a `u` record is the working-tree mode; `000000` is how Git reports an absent path.
+  it('maps deleted conflicts to deleted from the porcelain working-tree mode', async () => {
     readFileMock.mockResolvedValue('gitdir: /repo/.git/worktrees/feature\n')
     gitExecFileAsyncMock.mockResolvedValueOnce({
       stdout:
-        'u UD N... 100644 100644 000000 100644 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb cccccccccccccccccccccccccccccccccccccccc src/deleted.ts\n'
+        'u UD N... 100644 100644 000000 000000 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb cccccccccccccccccccccccccccccccccccccccc src/deleted.ts\n'
     })
 
     const result = await getStatus('/repo')
@@ -120,10 +123,12 @@ describe('getStatus', () => {
       conflictKind: 'deleted_by_them',
       conflictStatus: 'unresolved'
     })
+    expect(conflictFileProbes()).toEqual([])
   })
 
-  it('falls back to modified when the working-tree probe fails for a non-absence reason', async () => {
+  it('never re-probes the working tree for a conflict row, whatever the filesystem would say', async () => {
     readFileMock.mockResolvedValue('gitdir: /repo/.git/worktrees/feature\n')
+    // Every probe fails ENOENT (beforeEach) or EIO — neither may reach the row's status.
     accessMock.mockRejectedValue(Object.assign(new Error('EIO'), { code: 'EIO' }))
     gitExecFileAsyncMock.mockResolvedValueOnce({
       stdout:
@@ -134,19 +139,13 @@ describe('getStatus', () => {
 
     expect(result.entries[0]?.status).toBe('modified')
     expect(result.entries[0]?.conflictKind).toBe('added_by_us')
+    expect(conflictFileProbes()).toEqual([])
   })
 
-  // Why both cases normalize separators: git reports the worktree in the WSL guest namespace, and
-  // the assertion is about which path is probed, not which separator this host's `path` emits.
-  it('probes the conflict working tree through the distro spelling on Windows', async () => {
+  // Normalize separators to test probe targets independently of the current host.
+  it('resolves a WSL conflict row without crossing the 9p share', async () => {
     const platformSpy = vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
     readFileMock.mockResolvedValue('gitdir: /home/me/repo/.git/worktrees/feature\n')
-    accessMock.mockImplementation(async (target: string) => {
-      if (String(target).endsWith('new.ts')) {
-        return undefined
-      }
-      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
-    })
     gitExecFileAsyncMock.mockResolvedValueOnce({
       stdout:
         'u DU N... 100644 100644 100644 100644 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb cccccccccccccccccccccccccccccccccccccccc src/new.ts\n'
@@ -156,10 +155,10 @@ describe('getStatus', () => {
       const result = await getStatus('/home/me/repo/feature', { wslDistro: 'Ubuntu' })
 
       const probed = accessMock.mock.calls.map(([target]) => String(target).replaceAll('\\', '/'))
-      expect(probed).toContain('//wsl.localhost/Ubuntu/home/me/repo/feature/src/new.ts')
+      expect(probed).not.toContain('//wsl.localhost/Ubuntu/home/me/repo/feature/src/new.ts')
+      expect(conflictFileProbes()).toEqual([])
       expect(result.entries[0]?.status).toBe('modified')
       expect(result.entries[0]?.conflictKind).toBe('deleted_by_us')
-      // The conflict-marker probes travel the same way.
       expect(
         probed.filter((target) =>
           target.startsWith('//wsl.localhost/Ubuntu/home/me/repo/.git/worktrees/feature/')
@@ -200,10 +199,7 @@ describe('getStatus', () => {
 
     const result = await getStatus('/repo')
 
-    // Why: without -c core.quotePath=false git would emit
-    // "docs/\346\227\245\346\234\254\350\252\236/sample.md" (octal-escaped,
-    // wrapped in double quotes) and the parser would store that literal
-    // string as entry.path, breaking sidebar display + downstream blob reads.
+    // Without quotePath=false, octal-escaped names would break display and subsequent blob reads.
     expect(gitExecFileAsyncMock).toHaveBeenCalledWith([
       '-c',
       'core.quotePath=false',
@@ -304,7 +300,7 @@ describe('getStatus', () => {
         })
       }
       if (args[0] === 'symbolic-ref') {
-        return Promise.resolve({ stdout: 'feature/prompts\n' })
+        return Promise.resolve({ stdout: 'refs/heads/feature/prompts\n' })
       }
       if (args[0] === 'rev-parse' && args.includes('HEAD@{u}')) {
         return Promise.reject(new Error('fatal: no upstream configured'))
@@ -334,7 +330,7 @@ describe('getStatus', () => {
         stdout:
           '# branch.oid abcdef1234567890\n# branch.head feature/prompts\n# branch.upstream origin/main\n# branch.ab +1 -0\n'
       })
-      .mockResolvedValueOnce({ stdout: 'feature/prompts\n' })
+      .mockResolvedValueOnce({ stdout: 'refs/heads/feature/prompts\n' })
       .mockResolvedValueOnce({ stdout: 'origin/main\n' })
       .mockResolvedValueOnce({ stdout: 'abc123\n' })
       .mockResolvedValueOnce({ stdout: '3\t1\n' })
@@ -565,7 +561,16 @@ describe('getStatus', () => {
     const result = await getStatus('/repo')
 
     expect(gitExecFileAsyncMock).toHaveBeenCalledWith(
-      ['-c', 'core.quotePath=false', 'diff', '-z', '--numstat', '-M'],
+      [
+        '-c',
+        'core.quotePath=false',
+        '-c',
+        'diff.autoRefreshIndex=false',
+        'diff',
+        '-z',
+        '--numstat',
+        '-M'
+      ],
       expect.objectContaining({
         cwd: '/repo',
         env: expect.objectContaining({ GIT_OPTIONAL_LOCKS: '0' })
@@ -634,7 +639,6 @@ describe('getStatus', () => {
           stdout: '1 .M N... 100644 100644 100644 cccc cccc assets/logo.png\n'
         })
       }
-      // git reports binary files as '-' in both numstat columns.
       if (args.includes('--numstat')) {
         return Promise.resolve({ stdout: '-\t-\tassets/logo.png\n' })
       }
@@ -668,10 +672,7 @@ describe('getStatus', () => {
 
     expect(result.didHitLimit).toBe(true)
     expect(result.statusLength).toBeGreaterThan(10)
-    // First `limit` entries are kept; the rest are dropped.
     expect(result.entries.length).toBe(10)
-    // attachLineStats (numstat) must be skipped when the limit was hit — only
-    // the single streamed status read should have happened.
     expect(gitExecFileAsyncMock).toHaveBeenCalledTimes(1)
   })
 

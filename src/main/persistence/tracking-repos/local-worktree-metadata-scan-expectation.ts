@@ -203,6 +203,31 @@ function aliasesStillMatch(
   })
 }
 
+/** Reject structurally unremovable rows before filesystem probes; repeated refusals caused #17775. */
+export function isLocallyRemovableWorktreeMetadataRow(
+  state: PersistedState,
+  worktreeId: string,
+  currentAliases: readonly MetadataAliasEntry[]
+): boolean {
+  const localAlias = composeWorktreeHostIdentity(LOCAL_EXECUTION_HOST_ID, worktreeId)
+  if (currentAliases.some(([alias]) => alias !== localAlias)) {
+    return false
+  }
+  const legacy = state.worktreeMeta[worktreeId]
+  const identityKeys = state.worktreeIdentityAliases?.[localAlias]
+  if (identityKeys && identityKeys.length !== 1) {
+    return false
+  }
+  const canonical = identityKeys?.[0] ? state.worktreeMetaByIdentity?.[identityKeys[0]] : undefined
+  return !(
+    (legacy?.hostId && legacy.hostId !== LOCAL_EXECUTION_HOST_ID) ||
+    (canonical?.hostId && canonical.hostId !== LOCAL_EXECUTION_HOST_ID) ||
+    (identityKeys && !canonical) ||
+    (legacy && canonical && !isDeepStrictEqual(legacy, canonical)) ||
+    (!legacy && !canonical)
+  )
+}
+
 export function removeRevalidatedLocalWorktreeMetadata(
   state: PersistedState,
   expected: LocalWorktreeMetadataPruneExpectation,
@@ -211,29 +236,13 @@ export function removeRevalidatedLocalWorktreeMetadata(
 ): boolean {
   if (
     !rowStillMatches(state.worktreeMeta, expected.worktreeId, expected.expectedLegacy) ||
-    !aliasesStillMatch(state, expected, currentAliases)
+    !aliasesStillMatch(state, expected, currentAliases) ||
+    !isLocallyRemovableWorktreeMetadataRow(state, expected.worktreeId, currentAliases)
   ) {
     return false
   }
   const localAlias = composeWorktreeHostIdentity(LOCAL_EXECUTION_HOST_ID, expected.worktreeId)
-  if (currentAliases.some(([alias]) => alias !== localAlias)) {
-    return false
-  }
-  const legacy = state.worktreeMeta[expected.worktreeId]
   const identityKeys = state.worktreeIdentityAliases?.[localAlias]
-  if (identityKeys && identityKeys.length !== 1) {
-    return false
-  }
-  const canonical = identityKeys?.[0] ? state.worktreeMetaByIdentity?.[identityKeys[0]] : undefined
-  if (
-    (legacy?.hostId && legacy.hostId !== LOCAL_EXECUTION_HOST_ID) ||
-    (canonical?.hostId && canonical.hostId !== LOCAL_EXECUTION_HOST_ID) ||
-    (identityKeys && !canonical) ||
-    (legacy && canonical && !isDeepStrictEqual(legacy, canonical)) ||
-    (!legacy && !canonical)
-  ) {
-    return false
-  }
   if (identityKeys?.[0]) {
     removedIdentityKeys?.add(identityKeys[0])
   }

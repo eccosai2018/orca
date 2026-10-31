@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { committingSpawn } from '../bind-first-pane.test-fixture'
 import { HEADLESS_RUNTIME_WINDOW_ID, OrcaRuntimeService } from '../orca-runtime-test-mocks.spec'
 import type { RuntimeClientEvent } from '../orca-runtime-test-mocks.spec'
 import {
@@ -8,6 +9,7 @@ import {
   syncSinglePty
 } from '../orca-runtime-test-fixtures.spec'
 import { createSideEffectRuntime } from '../orca-runtime-test-scenario-builders.spec'
+import { DECORATIVE_TITLE_FACT_HEARTBEAT_MS } from '../decorative-title-fact-emission'
 
 describe('terminal side-effect fact channel', () => {
   it('defers desktop-only output scanners until a headless runtime is promoted', () => {
@@ -70,53 +72,64 @@ describe('terminal side-effect fact channel', () => {
     expect(events).toHaveLength(1)
   })
 
-  it('bounds decorative title delivery per paired client without reducing local frames', () => {
-    const { runtime, batches } = createSideEffectRuntime()
-    const firstClientEvents: RuntimeClientEvent[] = []
-    runtime.attachWindow(1)
-    runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
-    runtime.onClientEvent((event) => firstClientEvents.push(event))
+  it('bounds decorative title delivery per paired client below the local heartbeat', () => {
+    // Clear the local heartbeat each round so only the per-client gate can collapse repeats.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const { runtime, batches } = createSideEffectRuntime()
+      const firstClientEvents: RuntimeClientEvent[] = []
+      runtime.attachWindow(1)
+      runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
+      runtime.onClientEvent((event) => firstClientEvents.push(event))
 
-    const ptyIds = Array.from({ length: 64 }, (_, index) => `pty-remote-${index}`)
-    const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-    for (const ptyId of ptyIds) {
-      runtime.ingestSyntheticTitleFrame(ptyId, `\x1b]0;${frames[0]} Cursor Agent\x07`)
-    }
-    firstClientEvents.length = 0
-
-    for (const frame of frames.slice(1)) {
-      for (const ptyId of ptyIds) {
-        runtime.ingestSyntheticTitleFrame(ptyId, `\x1b]0;${frame} Cursor Agent\x07`)
+      const ptyIds = Array.from({ length: 64 }, (_, index) => `pty-remote-${index}`)
+      const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+      const stepPastHeartbeat = (): void => {
+        vi.setSystemTime(new Date(Date.now() + DECORATIVE_TITLE_FACT_HEARTBEAT_MS))
       }
+      for (const ptyId of ptyIds) {
+        runtime.ingestSyntheticTitleFrame(ptyId, `\x1b]0;${frames[0]} Cursor Agent\x07`)
+      }
+      firstClientEvents.length = 0
+
+      for (const frame of frames.slice(1)) {
+        stepPastHeartbeat()
+        for (const ptyId of ptyIds) {
+          runtime.ingestSyntheticTitleFrame(ptyId, `\x1b]0;${frame} Cursor Agent\x07`)
+        }
+      }
+
+      expect(firstClientEvents).toEqual([])
+      expect(batches).toHaveLength(ptyIds.length * frames.length)
+
+      const bellChunk = `\x1b]0;${frames.at(-1)} Cursor Agent\x07\x07`
+      runtime.onPtyData(ptyIds[0], bellChunk, 1)
+      expect(firstClientEvents).toEqual([
+        expect.objectContaining({
+          type: 'terminalSideEffects',
+          batch: expect.objectContaining({ facts: [{ kind: 'bell' }] })
+        })
+      ])
+      firstClientEvents.length = 0
+
+      const secondClientEvents: RuntimeClientEvent[] = []
+      runtime.onClientEvent((event) => secondClientEvents.push(event))
+      stepPastHeartbeat()
+      for (const ptyId of ptyIds) {
+        runtime.ingestSyntheticTitleFrame(ptyId, `\x1b]0;${frames[0]} Cursor Agent\x07`)
+      }
+
+      expect(firstClientEvents).toEqual([])
+      expect(secondClientEvents).toHaveLength(ptyIds.length)
+
+      for (const ptyId of ptyIds) {
+        runtime.ingestSyntheticTitleFrame(ptyId, '\x1b]0;Cursor ready\x07')
+      }
+      expect(firstClientEvents).toHaveLength(ptyIds.length)
+      expect(secondClientEvents).toHaveLength(ptyIds.length * 2)
+    } finally {
+      vi.useRealTimers()
     }
-
-    expect(firstClientEvents).toEqual([])
-    expect(batches).toHaveLength(ptyIds.length * frames.length)
-
-    const bellChunk = `\x1b]0;${frames.at(-1)} Cursor Agent\x07\x07`
-    runtime.onPtyData(ptyIds[0], bellChunk, 1)
-    expect(firstClientEvents).toEqual([
-      expect.objectContaining({
-        type: 'terminalSideEffects',
-        batch: expect.objectContaining({ facts: [{ kind: 'bell' }] })
-      })
-    ])
-    firstClientEvents.length = 0
-
-    const secondClientEvents: RuntimeClientEvent[] = []
-    runtime.onClientEvent((event) => secondClientEvents.push(event))
-    for (const ptyId of ptyIds) {
-      runtime.ingestSyntheticTitleFrame(ptyId, `\x1b]0;${frames[0]} Cursor Agent\x07`)
-    }
-
-    expect(firstClientEvents).toEqual([])
-    expect(secondClientEvents).toHaveLength(ptyIds.length)
-
-    for (const ptyId of ptyIds) {
-      runtime.ingestSyntheticTitleFrame(ptyId, '\x1b]0;Cursor ready\x07')
-    }
-    expect(firstClientEvents).toHaveLength(ptyIds.length)
-    expect(secondClientEvents).toHaveLength(ptyIds.length * 2)
   })
 
   it('omits terminalSideEffects from non-consuming listeners while other events still flow', () => {
@@ -164,8 +177,7 @@ describe('terminal side-effect fact channel', () => {
 
       runtime.onPtyData(ptyId, '\x1b]0;Codex working\x07', 100)
       runtime.onPtyData(ptyId, 'output without a title\r\n', 101)
-      // The phone is still subscribed: disposing trackers on this edge would cancel
-      // its armed stale-working-title timer and strand a 'working' spinner (#1437).
+      // A remaining phone subscriber still needs the tracker's stale-working timer (#1437).
       unsubscribeDesktop()
 
       await vi.advanceTimersByTimeAsync(3_000)
@@ -214,7 +226,7 @@ describe('terminal side-effect fact channel', () => {
       { kind: 'title', normalizedTitle: 'Codex working', rawTitle: 'Codex working' },
       { kind: 'agent-working' },
       { kind: 'title', normalizedTitle: 'Codex done', rawTitle: 'Codex done' },
-      { kind: 'agent-idle', title: 'Codex done' },
+      { kind: 'agent-idle', title: 'Codex done', status: 'idle' },
       { kind: 'bell' }
     ])
   })
@@ -234,7 +246,6 @@ describe('terminal side-effect fact channel', () => {
     const { runtime, batches } = createSideEffectRuntime()
     syncSinglePty(runtime)
 
-    // Plain output and a BEL-terminated non-title OSC stay fact-free.
     runtime.onPtyData('pty-1', 'plain output\r\n', 100)
     runtime.onPtyData('pty-1', '\x1b]7;file://host', 101)
     runtime.onPtyData('pty-1', '/tmp\x07', 102)
@@ -261,7 +272,7 @@ describe('terminal side-effect fact channel', () => {
 
       await vi.advanceTimersByTimeAsync(3_000)
 
-      // staleWorkingTitleClear tells the renderer to clear state without scheduling a task-complete notification the unthrottled timer didn't earn.
+      // Clear stale state without sending an unearned completion notification.
       expect(batches.flatMap((batch) => batch.facts)).toEqual([
         {
           kind: 'title',
@@ -269,7 +280,7 @@ describe('terminal side-effect fact channel', () => {
           rawTitle: 'Codex',
           staleWorkingTitleClear: true
         },
-        { kind: 'agent-idle', title: 'Codex', staleWorkingTitleClear: true }
+        { kind: 'agent-idle', title: 'Codex', status: 'idle', staleWorkingTitleClear: true }
       ])
     } finally {
       vi.useRealTimers()
@@ -285,10 +296,9 @@ describe('terminal side-effect fact channel', () => {
     expect(batches).toHaveLength(1)
     expect(batches[0].facts).toEqual([
       { kind: 'title', normalizedTitle: '⠋ Cursor Agent', rawTitle: '⠋ Cursor Agent' },
-      // Synthesized spinner classifies as working — agent facts derive from synthetic frames the same as from real bytes.
       { kind: 'agent-working' }
     ])
-    // Synthetic frames are fabricated by main, so they must not advance the metered output sequence the renderer ACK budget uses.
+    // Synthetic frames must not advance the metered output sequence used by ACK budgets.
     expect(runtime.getPtyOutputSequence('pty-1')).toBe(0)
   })
 
@@ -362,7 +372,7 @@ describe('terminal side-effect fact channel', () => {
   it('lets an explicit terminal rename override cached Cursor identity and restores it after clearing', async () => {
     const runtime = new OrcaRuntimeService(store)
     runtime.setPtyController({
-      spawn: vi.fn().mockResolvedValue({ id: 'pty-1' }),
+      spawn: vi.fn(committingSpawn(runtime, async () => ({ id: 'pty-1' }))),
       write: () => true,
       kill: () => true,
       getForegroundProcess: async () => null
@@ -460,26 +470,76 @@ describe('terminal side-effect fact channel', () => {
     )
   })
 
-  it('treats synchronous foreground read failures as unavailable', async () => {
-    const { runtime, batches } = createSideEffectRuntime()
+  it.each([
+    { presence: 'unverifiable' as const, exited: true },
+    { presence: 'exited' as const, exited: true },
+    { presence: 'live' as const, exited: false }
+  ])('confirms an exit title from hook presence $presence', async ({ presence, exited }) => {
+    const checkPresence = vi.fn(async () => presence)
+    const { runtime, batches } = createSideEffectRuntime(checkPresence)
     syncSinglePty(runtime)
+    const getForegroundProcess = vi.fn(async () => 'zsh')
+    runtime.setPtyController({ write: () => true, kill: () => true, getForegroundProcess })
     runtime.ingestSyntheticTitleFrame('pty-1', '\x1b]0;Codex ready\x07')
-    const getForegroundProcess = vi.fn(() => {
-      throw new TypeError('getForegroundProcess is unavailable')
-    })
-    runtime.setPtyController({
-      write: () => true,
-      kill: () => true,
-      getForegroundProcess
-    })
 
-    runtime.onPtyData('pty-1', '\x1b]0;bichir\x07', 100)
+    runtime.onPtyData('pty-1', '\x1b]0;~/repo\x07', 100)
 
-    await vi.waitFor(() =>
-      expect(batches.flatMap((batch) => batch.facts)).toContainEqual({ kind: 'agent-exited' })
+    await vi.waitFor(() => expect(checkPresence).toHaveBeenCalled())
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    // An unanswered process check must fall through to the foreground read.
+    expect(batches.flatMap((batch) => batch.facts).some((f) => f.kind === 'agent-exited')).toBe(
+      exited
     )
-    expect(getForegroundProcess).toHaveBeenCalledOnce()
   })
+
+  it.each(['wsl.exe', 'tmux'])(
+    'confirms an exit when the foreground answers with non-agent %s',
+    async (foreground) => {
+      const { runtime, batches } = createSideEffectRuntime(async () => null)
+      syncSinglePty(runtime)
+      runtime.setPtyController({
+        write: () => true,
+        kill: () => true,
+        getForegroundProcess: vi.fn(async () => foreground)
+      })
+      runtime.ingestSyntheticTitleFrame('pty-1', '\x1b]0;Codex ready\x07')
+
+      runtime.onPtyData('pty-1', '\x1b]0;~/repo\x07', 100)
+
+      await vi.waitFor(() =>
+        expect(batches.flatMap((batch) => batch.facts)).toContainEqual({ kind: 'agent-exited' })
+      )
+    }
+  )
+
+  it.each([
+    { presence: null, exited: true },
+    { presence: 'unverifiable' as const, exited: false }
+  ])(
+    'treats synchronous foreground read failures as unavailable (hook presence $presence)',
+    async ({ presence, exited }) => {
+      // Only identified owners retain agent identity through silence.
+      const { runtime, batches } = createSideEffectRuntime(async () => presence)
+      syncSinglePty(runtime)
+      runtime.ingestSyntheticTitleFrame('pty-1', '\x1b]0;Codex ready\x07')
+      const getForegroundProcess = vi.fn(() => {
+        throw new TypeError('getForegroundProcess is unavailable')
+      })
+      runtime.setPtyController({
+        write: () => true,
+        kill: () => true,
+        getForegroundProcess
+      })
+
+      runtime.onPtyData('pty-1', '\x1b]0;bichir\x07', 100)
+
+      await vi.waitFor(() => expect(getForegroundProcess).toHaveBeenCalled())
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(
+        batches.flatMap((batch) => batch.facts).some((fact) => fact.kind === 'agent-exited')
+      ).toBe(exited)
+    }
+  )
 
   it('aligns a restored session and pre-response bytes to the provider sequence', async () => {
     const { runtime } = createSideEffectRuntime()
@@ -659,7 +719,6 @@ describe('terminal side-effect fact channel', () => {
 
     runtime.onPtyData('pty-1', 'PR https://github.com/acme/orca/pull/4', 100)
     runtime.onPtyData('pty-1', '2\r\nand https://github.com/acme/orca/pull/43 done\r\n', 101)
-    // Repeated URL: deduped per PTY, like the renderer byte detector.
     runtime.onPtyData('pty-1', 'again https://github.com/acme/orca/pull/42\r\n', 102)
 
     expect(batches).toHaveLength(1)

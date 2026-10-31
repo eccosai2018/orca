@@ -1,21 +1,10 @@
-/**
- * Runs one action against a row's captured owner and reports the result as
- * data.
- *
- * Owner conflicts are ordinary outcomes here, not exceptions: the host changed,
- * the target is gone, the server is too old to fence, or the chosen destination
- * no longer resolves. Each one has something the user can do next, so each is
- * returned with the recovery action the host-status vocabulary already defines
- * rather than thrown into a generic failure toast.
- *
- * Nothing in this module reads ambient state. The availability it is handed was
- * computed from the row the user acted on, and every request is fenced with it.
- */
+/** Run only against supplied captured ownership. Return expected owner conflicts with established recovery verbs rather than generic toasts; never infer from ambient state. */
 
 import type {
   Automation,
   AutomationCreateInput,
   AutomationRun,
+  AutomationRunsPage,
   AutomationUpdateInput
 } from '../../../../shared/automations-types'
 import {
@@ -40,8 +29,11 @@ import {
   deleteAutomationForOwner,
   deleteOrphanAutomation,
   listAutomationRunsForOwner,
+  listAutomationRunsPageForOwner,
   listAutomationsForOwner,
+  listScopedAutomations,
   listOrphanAutomationRuns,
+  listOrphanAutomationRunsPage,
   matchAutomationOwnerConflict,
   runAutomationNowForOwner,
   updateAutomationForOwner,
@@ -70,12 +62,27 @@ const CONFLICT_RECOVERY: Record<AutomationOwnerConflictCode, AutomationHostRecov
     automation_destination_invalid: 'retry'
   }
 
-function conflictOutcome(code: AutomationOwnerConflictCode): AutomationActionOutcome<never> {
+function conflictOutcome(
+  code: AutomationOwnerConflictCode,
+  error: unknown
+): AutomationActionOutcome<never> {
+  const message =
+    typeof error === 'string'
+      ? error
+      : error &&
+          typeof error === 'object' &&
+          'message' in error &&
+          typeof error.message === 'string'
+        ? error.message
+        : null
   return {
     status: 'conflict',
     conflict: {
       code,
-      message: automationOwnerConflictMessage(code),
+      message:
+        message && message.trim() !== code
+          ? stripAutomationOwnerConflictCode(message)
+          : automationOwnerConflictMessage(code),
       recovery: CONFLICT_RECOVERY[code]
     }
   }
@@ -84,7 +91,7 @@ function conflictOutcome(code: AutomationOwnerConflictCode): AutomationActionOut
 function classify(error: unknown): AutomationActionOutcome<never> {
   const conflict = matchAutomationOwnerConflict(error)
   if (conflict) {
-    return conflictOutcome(conflict)
+    return conflictOutcome(conflict, error)
   }
   if (error instanceof AutomationHostScopeUnsupportedError) {
     return {
@@ -108,11 +115,7 @@ function classify(error: unknown): AutomationActionOutcome<never> {
   }
 }
 
-/**
- * The captured owner decides whether the request is made at all, so a blocked
- * row never reaches the transport and an uncaptured one is handed back to the
- * caller's legacy path instead of being run against a guessed owner.
- */
+/** Block before transport; return uncaptured rows to the caller’s unfenced legacy path instead of guessing an owner. */
 async function attempt<TValue>(
   availability: AutomationActionAvailability,
   owned: (owner: AutomationOwnerRef) => Promise<TValue>,
@@ -150,7 +153,7 @@ function orphanUnsupported(): AutomationActionBlock {
 
 export type AutomationActionResult<TValue> =
   | AutomationActionOutcome<TValue>
-  /** The caller must fall back to its unfenced path; Step 9 deletes this arm. */
+  /** Preserve the caller’s unfenced fallback for rows without captured metadata. */
   | { status: 'uncaptured' }
 
 export async function updateOwnedAutomation(
@@ -163,7 +166,7 @@ export async function updateOwnedAutomation(
   return await attempt(
     availability,
     (owner) => updateAutomationForOwner(owner, id, updates, destination),
-    () => updateOrphanAutomation(authority, id, updates)
+    () => updateOrphanAutomation(authority, id, updates, destination)
   )
 }
 
@@ -186,19 +189,25 @@ export async function runOwnedAutomationNow(
   return await attempt(availability, (owner) => runAutomationNowForOwner(owner, id))
 }
 
-/**
- * Edit hydration re-reads the record inside its captured scope, so a row that
- * moved hosts since the list is reported as gone rather than silently replaced
- * by another authority's record with the same ID.
- */
+/** Re-read edit data within its captured scope so a moved row cannot silently become another authority’s same-ID record. */
 export async function showOwnedAutomation(
   availability: AutomationActionAvailability,
-  id: string
+  id: string,
+  authority?: AutomationAuthorityRef
 ): Promise<AutomationActionResult<Automation | null>> {
-  return await attempt(availability, async (owner) => {
-    const result = await listAutomationsForOwner(owner)
-    return result.automations.find((automation) => automation.id === id) ?? null
-  })
+  return await attempt(
+    availability,
+    async (owner) => {
+      const result = await listAutomationsForOwner(owner)
+      return result.automations.find((automation) => automation.id === id) ?? null
+    },
+    authority
+      ? async () => {
+          const result = await listScopedAutomations(authority, { kind: 'orphan' })
+          return result.automations.find((automation) => automation.id === id) ?? null
+        }
+      : undefined
+  )
 }
 
 export async function listOwnedAutomationRuns(
@@ -210,6 +219,19 @@ export async function listOwnedAutomationRuns(
     availability,
     (owner) => listAutomationRunsForOwner(owner, automationId),
     () => listOrphanAutomationRuns(authority, automationId)
+  )
+}
+
+export async function listOwnedAutomationRunsPage(
+  availability: AutomationActionAvailability,
+  authority: AutomationAuthorityRef,
+  automationId: string,
+  options: { limit?: number; cursor?: string }
+): Promise<AutomationActionResult<AutomationRunsPage>> {
+  return await attempt(
+    availability,
+    (owner) => listAutomationRunsPageForOwner(owner, automationId, options),
+    () => listOrphanAutomationRunsPage(authority, automationId, options)
   )
 }
 

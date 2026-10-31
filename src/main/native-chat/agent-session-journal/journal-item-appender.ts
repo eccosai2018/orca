@@ -1,66 +1,107 @@
 import { agentJournalItemKey } from '../../../shared/agent-session-journal-item-key'
 import type {
   AgentJournalItemBody,
-  AgentJournalItemIdentity
+  AgentJournalItemIdentity,
+  AgentJournalMessageItem
 } from '../../../shared/agent-session-journal-types'
 import { journalItemRowBuilder } from './journal-row-builders'
 import type { JournalReducerState } from './journal-reducer'
-import type { AgentSessionJournal } from './journal-store'
-import type { JournalAppendResult } from './journal-store-contracts'
+import type { JournalAppendResult, JournalItemAppendOptions } from './journal-store-contracts'
 import type { JournalRow } from './journal-row-schema'
-import { appendToolOutputFallback } from './journal-tool-output-fallback'
+import type { JournalOperationReceipt, JournalRowWriter } from './journal-row-writer'
+import type { JournalAttachmentClaim, journalInputClaimsReceipt } from './journal-submission-hook'
 
-type ItemAppendOptions = { fence: number; observedAt?: number; recovered?: true }
-type JournalBlob = { digest: string; payload: string }
+// Module-level Error stacks retain startup code and buffers; construct them only when needed.
+class NothingResolvedError extends Error {}
+
+export type JournalResolvedItem = { identity: AgentJournalItemIdentity; body: AgentJournalItemBody }
 
 export class JournalItemAppender {
   constructor(
     private readonly deps: {
-      journal: () => AgentSessionJournal
+      inputReceipt: (
+        rows: readonly JournalRow[],
+        receipt?: JournalOperationReceipt
+      ) => ReturnType<typeof journalInputClaimsReceipt>
       state: () => JournalReducerState
-      enqueue: (
-        build: (seq: number, ts: number) => JournalRow,
-        blobs?: readonly JournalBlob[]
-      ) => Promise<JournalRow>
+      enqueue: JournalRowWriter['enqueue']
+      claimAttachments: JournalAttachmentClaim
     }
   ) {}
 
   append(
     identity: AgentJournalItemIdentity,
     body: AgentJournalItemBody,
-    options: ItemAppendOptions
+    options: JournalItemAppendOptions,
+    receipt?: JournalOperationReceipt
   ): Promise<JournalAppendResult> {
     const itemId = agentJournalItemKey(identity)
     return this.deps
-      .enqueue(journalItemRowBuilder(this.deps.state, identity, body, options))
-      .then((row) => itemAppendResult(row, itemId))
+      .enqueue(journalItemRowBuilder(this.deps.state, identity, body, options), (rows) =>
+        this.deps.inputReceipt(rows, receipt)
+      )
+      .then((row) => appendResult(row, itemId))
   }
 
-  appendWithBlobs(
+  /** A client-authored message claims the uploads it names with its row; a swept one refuses both. */
+  appendClaimingAttachments(
     identity: AgentJournalItemIdentity,
-    body: AgentJournalItemBody,
-    blobs: readonly JournalBlob[],
-    options: ItemAppendOptions
+    body: AgentJournalMessageItem,
+    options: JournalItemAppendOptions
   ): Promise<JournalAppendResult> {
-    const itemId = agentJournalItemKey(identity)
+    let committed: (() => void) | void
     return this.deps
-      .enqueue(journalItemRowBuilder(this.deps.state, identity, body, options), blobs)
-      .then((row) => itemAppendResult(row, itemId))
-      .catch((error: unknown) =>
-        appendToolOutputFallback({
-          journal: this.deps.journal(),
-          error,
-          identity,
-          body,
-          blobs,
-          itemId,
-          fence: options.fence
-        })
+      .enqueue(journalItemRowBuilder(this.deps.state, identity, body, options), {
+        write: (db) => {
+          committed = this.deps.claimAttachments(
+            db,
+            body,
+            true,
+            undefined,
+            body.sentAs === 'goal' ? agentJournalItemKey(identity) : undefined
+          )
+        },
+        committed: () => committed?.()
+      })
+      .then((row) => appendResult(row, agentJournalItemKey(identity)))
+  }
+
+  /** Resolve against preceding queued writes; null appends nothing. */
+  appendResolved(
+    resolve: () => JournalResolvedItem | null,
+    options: JournalItemAppendOptions
+  ): Promise<JournalAppendResult | null> {
+    let itemId = ''
+    return this.deps
+      .enqueue(
+        (seq, ts) => {
+          const resolved = resolve()
+          if (resolved === null) {
+            throw new NothingResolvedError('journal_item_resolved_to_nothing')
+          }
+          itemId = agentJournalItemKey(resolved.identity)
+          return journalItemRowBuilder(
+            this.deps.state,
+            resolved.identity,
+            resolved.body,
+            options
+          )(seq, ts)
+        },
+        (rows) => this.deps.inputReceipt(rows)
+      )
+      .then(
+        (row) => appendResult(row, itemId),
+        (error: unknown) => {
+          if (error instanceof NothingResolvedError) {
+            return null
+          }
+          throw error
+        }
       )
   }
 }
 
-function itemAppendResult(row: JournalRow, itemId: string): JournalAppendResult {
+function appendResult(row: JournalRow, itemId: string): JournalAppendResult {
   return {
     cursor: { epoch: row.epoch, sequence: row.seq },
     itemId,

@@ -1,8 +1,3 @@
-/* Why: GitLab counterpart to GitHubItemDialog. Side sheet with three
-   tabs (Description / Conversation / Pipeline) and footer actions —
-   close/reopen, merge, and a top-level comment composer. Files /
-   inline review-comment positioning / approvals are deferred to v1.5
-   since they mirror substantial GitHub-side surface area. */
 import { useCallback, useMemo } from 'react'
 import { GitLabItemDialogView } from './gitlab-item-dialog/gitlab-item-dialog-view'
 import type {
@@ -47,7 +42,7 @@ export default function GitLabItemDialog({
 
   const handleRefresh = useCallback(() => {
     setRefreshNonce((n) => n + 1)
-  }, [])
+  }, [setRefreshNonce])
   const detailsEditing = useGitLabDetailsEditing(item, repoSelector, state)
   const pipelineActions = useGitLabPipelineActions(item, repoSelector, state, handleRefresh)
   const reviewActions = useGitLabReviewActions(item, repoSelector, state)

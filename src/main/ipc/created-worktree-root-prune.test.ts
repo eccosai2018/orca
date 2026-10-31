@@ -2,7 +2,7 @@ import type * as NodeFsPromises from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as RepoWorktrees from '../repo-worktrees'
-import { listRepoWorktrees } from '../repo-worktrees'
+import { listRepoWorktreeGraph } from '../repo-worktrees'
 import type { Store } from '../persistence'
 import type { Repo } from '../../shared/repo-types'
 import {
@@ -22,7 +22,7 @@ vi.mock('node:fs/promises', async () => {
 
 vi.mock('../repo-worktrees', async () => {
   const actual = await vi.importActual<typeof RepoWorktrees>('../repo-worktrees')
-  return { ...actual, listRepoWorktrees: vi.fn() }
+  return { ...actual, listRepoWorktreeGraph: vi.fn() }
 })
 
 const repo: Repo = {
@@ -56,10 +56,9 @@ describe('recovered worktree root pruning', () => {
   beforeEach(() => {
     invalidateAuthorizedRootsCache()
     __resetCreatedWorktreeRootsForTests()
-    vi.mocked(listRepoWorktrees).mockReset()
-    // The #16520 outage itself: `listWorktrees` softens every Git failure to `[]`, so the rebuild
-    // reports success with the recovered row missing and the probe is the only remaining evidence.
-    vi.mocked(listRepoWorktrees).mockResolvedValue([])
+    vi.mocked(listRepoWorktreeGraph).mockReset()
+    // Git failures soften to empty listings; the probe must preserve independently recovered roots (#16520).
+    vi.mocked(listRepoWorktreeGraph).mockResolvedValue([])
     statMock.mockReset()
     statMock.mockResolvedValue({})
   })
@@ -79,8 +78,7 @@ describe('recovered worktree root pruning', () => {
   })
 
   it('keeps a recovered root when the probe fails for any reason but ENOENT', async () => {
-    // A transient EACCES/EIO is not evidence of removal, and revoking on it would deny a worktree
-    // the user is working in.
+    // Transient permission/I/O errors do not prove removal.
     for (const code of ['EACCES', 'EIO', 'EPERM']) {
       __resetCreatedWorktreeRootsForTests()
       const store = makeStore()
@@ -94,7 +92,7 @@ describe('recovered worktree root pruning', () => {
   })
 
   it('finishes the rebuild and keeps the root when the probe never settles', async () => {
-    // A dead mount pins the syscall; the rebuild gates filesystem auth, so it must not wait on it.
+    // Authorization rebuilds must not wait on a dead mount's stat.
     vi.useFakeTimers()
     const store = makeStore()
     registerCreatedWorktreeRoot(store, repo.id, RECOVERED)

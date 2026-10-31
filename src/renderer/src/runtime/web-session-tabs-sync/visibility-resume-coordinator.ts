@@ -31,7 +31,6 @@ export type VisibilityResumeCoordinatorOptions = {
   activeRuntimeWorktreeKey: () => string | null
 }
 
-/** Coordinates inventory omissions and cross-environment replay during visibility resumes. */
 export class VisibilityResumeCoordinator {
   private batch: VisibilityResumeBatch | null = null
 
@@ -280,6 +279,7 @@ export class VisibilityResumeCoordinator {
     visibilityGeneration: number,
     inventoryReceivedFrame: number,
     snapshots: readonly RuntimeMobileSessionTabsResult[],
+    hostAuthoritative: boolean,
     runtimeId?: string
   ): VisibilityResumeMissing[] {
     return recordVisibilityResumeInventoryReceipt({
@@ -289,6 +289,7 @@ export class VisibilityResumeCoordinator {
       visibilityGeneration,
       inventoryReceivedFrame,
       snapshots,
+      hostAuthoritative,
       runtimeId
     })
   }

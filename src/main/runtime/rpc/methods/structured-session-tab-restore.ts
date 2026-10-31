@@ -1,11 +1,15 @@
-import { STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY } from '../../../../shared/protocol-version'
 import type { RpcContext } from '../core'
+import { supportsStructuredAgentSessions } from './structured-agent-session-policy'
 
-export async function restoreStructuredTabsIfSupported(
-  runtime: RpcContext['runtime'],
-  capabilities: readonly string[] | undefined
-): Promise<void> {
-  if (capabilities?.includes(STRUCTURED_AGENT_SESSION_RUNTIME_CAPABILITY)) {
-    await runtime.restoreStructuredAgentSessionTabs()
+/** Prepare record-only tabs even for legacy mobile fallback rows; capability gating would leave neither chat nor prompt after restart.
+ * No journal is opened, and an empty saved inventory never builds the host. */
+export function prepareStructuredTabsIfSupported(
+  context: Pick<RpcContext, 'runtime' | 'clientKind' | 'clientCapabilities'>
+): Promise<void> | undefined {
+  const shouldRestore = context.clientKind === 'mobile' || supportsStructuredAgentSessions(context)
+  if (shouldRestore && typeof context.runtime.restoreStructuredAgentSessionTabs === 'function') {
+    return context.runtime.restoreStructuredAgentSessionTabs()
   }
+  // Nothing to restore: callers skip the await, so a stream's setup keeps its timing.
+  return undefined
 }

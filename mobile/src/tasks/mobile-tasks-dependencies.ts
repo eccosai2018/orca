@@ -1,20 +1,23 @@
+import { openExternalLink } from '../platform/external-link'
 export { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 export type { ReactNode } from 'react'
 export {
   ActivityIndicator,
   FlatList,
-  Linking,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   View
 } from 'react-native'
+// Use the platform seam: WebView window.open is refused by both shells despite resolving successfully.
+// The seam reports failures itself and returns void, preventing unreachable rejection handlers.
+export const Linking: { openURL: (url: string) => void } = { openURL: openExternalLink }
 export { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
-export * as Clipboard from 'expo-clipboard'
-export { useLocalSearchParams, useRouter } from 'expo-router'
+export { useLocalSearchParams } from 'expo-router'
+// The embedded page has one history entry; route pushes and Back must hand off to the native app stack.
+export { useRouteHandoff as useRouter } from '../navigation/route-handoff'
 export {
   AlertTriangle,
   Check,
@@ -26,15 +29,17 @@ export {
   ExternalLink,
   GitBranch,
   Lock,
+  MoreHorizontal,
   Pencil,
   Plus,
   RefreshCw,
-  Send,
+  Search,
+  SlidersHorizontal,
   X
 } from 'lucide-react-native'
 export type { RpcClient } from '../transport/rpc-client'
 export type { RpcSuccess } from '../transport/types'
-export { useHostClient } from '../transport/client-context'
+export { useHostClient } from '../transport/host-client-hooks'
 export {
   useLastConnectedAt,
   useRelayRecoveryStatus,
@@ -44,10 +49,13 @@ export { classifyConnection } from '../transport/connection-health'
 export { StatusDot } from '../components/StatusDot'
 export { ActionSheetModal } from '../components/ActionSheetModal'
 export { BottomDrawer } from '../components/BottomDrawer'
+export { BottomDrawerModalHost } from '../components/bottom-drawer-modal-host'
 export { ConfirmModal } from '../components/ConfirmModal'
 export { MobileMarkdown } from '../components/MobileMarkdown'
 export { MobileAgentIcon } from '../components/MobileAgentIcon'
 export { MobileWorkspaceNameInput } from '../components/MobileWorkspaceNameInput'
+export { MessageBox } from '../components/composer-input/MessageBox'
+export { TextField } from '../components/composer-input/TextField'
 export { MobileSearchField } from '../components/MobileSearchField'
 export { MobileSyntaxSegments } from '../components/MobileSyntaxSegments'
 export { PickerModal } from '../components/PickerModal'
@@ -108,26 +116,33 @@ export { WORKTREE_CREATE_TIMEOUT_MS } from './workspace-create-timeout'
 export {
   isSetupHookTrusted,
   normalizeSetupHookTrust,
-  trustedOrcaHooksWithSetupApproval,
+  persistSetupHookTrustApproval,
+  readRepoHooksSetupCommand,
   wasSetupHookPreviouslyApproved
 } from './setup-hook-trust'
 export { colors, radii, spacing, typography } from '../theme/mobile-theme'
+export type { MobileColorScheme } from '../theme/mobile-theme'
+export { themedStyleSheet, themedStyles } from '../theme/themed-styles'
+export { useMobileColorScheme } from '../theme/use-mobile-color-scheme'
 export { triggerMediumImpact } from '../platform/haptics'
 export {
   CROSS_REPO_DISPLAY_LIMIT,
+  getTaskPagePerRepoLimit,
+  getWorkItemCountedTotalPages,
   isGitHubWorkItemsSshRemoteRequiredError,
-  PER_REPO_FETCH_LIMIT
-} from './mobile-work-items'
+  PER_REPO_FETCH_LIMIT,
+  sortWorkItemsByNumber,
+  taskPageToGitHubApiPage
+} from '../../../src/shared/work-items'
 export {
   filterAvailableTaskProviders,
   normalizeVisibleTaskProviders,
   resolveVisibleTaskProvider
-} from './mobile-task-providers'
-export type { TaskProvider } from './mobile-task-providers'
+} from '../../../src/shared/task-providers'
+export type { TaskProvider } from '../../../src/shared/task-providers'
 export { hasSettledHostRepoList } from './host-repo-list'
 export { useHostRepoList } from './use-host-repo-list'
 export { isHostedTaskRepo, reconcileRepoSelection } from './hosted-repo-selection'
-export { extractLinearIssueReadItems } from './linear-mobile-issue-read'
 export type { LinearMobileIssue } from './linear-mobile-issue-read'
 export { MOBILE_TUI_AGENT_AUTO_PICK_ORDER } from './mobile-tui-agents'
 export { resolveComposerBranchSelection } from './mobile-composer-branch-selection'

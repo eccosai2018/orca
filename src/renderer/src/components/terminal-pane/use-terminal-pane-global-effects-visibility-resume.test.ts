@@ -97,11 +97,7 @@ vi.mock('./terminal-input-activity', () => ({
   recordTerminalUserInputForLeaf: mocks.recordTerminalUserInputForLeaf
 }))
 
-// Why: this suite invokes the hook outside a real React render (the react mock
-// above runs effects synchronously and manages refs by hand), so a reactive
-// useAppStore(selector) call would throw an "Invalid hook call". Read the
-// current snapshot synchronously instead; getState/setState stay real so tests
-// can seed terminalLayoutsByTabId.
+// This harness runs hooks without React rendering; use real synchronous store snapshots instead of reactive selectors that would throw invalid-hook-call.
 vi.mock('@/store', async (importOriginal) => {
   const actual = await importOriginal<typeof StoreModule>()
   const realHook = actual.useAppStore
@@ -178,7 +174,6 @@ describe('useTerminalPaneGlobalEffects', () => {
     beginHookRender()
     useTerminalPaneGlobalEffects({
       tabId: 'tab-1',
-      worktreeId: 'wt-1',
       isActive: true,
       isVisible: true,
       isSyncFitEnabled: true,
@@ -202,13 +197,12 @@ describe('useTerminalPaneGlobalEffects', () => {
       'fit-reveal',
       'intent:terminal-a',
       'intent:terminal-b',
-      'reveal-repaint'
+      'reveal-present'
     ])
-    expect(manager.resetWebglTextureAtlases).not.toHaveBeenCalled()
     vi.advanceTimersByTime(0)
-    expect(order.slice(-3)).toEqual(['reveal-repaint', 'reset-atlas', 'refresh'])
-    expect(manager.resetWebglTextureAtlases).toHaveBeenCalledTimes(1)
-    expect(manager.refreshAllPanes).toHaveBeenCalledTimes(1)
+    // A healthy shared atlas is not cleared on an ordinary worktree reveal.
+    expect(manager.resetWebglTextureAtlases).not.toHaveBeenCalled()
+    expect(manager.scheduleRevealRepaint).not.toHaveBeenCalled()
     expect(mocks.restoreScrollStateAfterLayout).not.toHaveBeenCalled()
     expect(mocks.flushTerminalOutput).toHaveBeenNthCalledWith(1, terminalA, {
       maxChars: 256 * 1024
@@ -247,7 +241,6 @@ describe('useTerminalPaneGlobalEffects', () => {
     registerManagerForReset(manager)
     const baseArgs = {
       tabId: 'tab-1',
-      worktreeId: 'wt-1',
       managerRef: { current: manager as never },
       containerRef: { current: null },
       paneTransportsRef: { current: new Map() },
@@ -307,6 +300,62 @@ describe('useTerminalPaneGlobalEffects', () => {
     vi.advanceTimersByTime(500)
   })
 
+  it.each([
+    ['skips focus while the chat leaf is active', true],
+    ['keeps focusing an active split terminal leaf', false]
+  ])('chat view mode %s', (_label, covered) => {
+    vi.stubGlobal(
+      'requestAnimationFrame',
+      vi.fn((callback: FrameRequestCallback) => {
+        callback(0)
+        return 1
+      })
+    )
+    const pane = {
+      id: 1,
+      terminal: { name: 'terminal-a' },
+      container: { querySelector: vi.fn(() => (covered ? {} : null)) }
+    }
+    const manager = {
+      getPanes: vi.fn(() => [pane]),
+      resumeRendering: vi.fn(),
+      resetWebglTextureAtlases: vi.fn(),
+      scheduleRevealRepaint: vi.fn(),
+      scheduleRevealPresent: vi.fn(),
+      refreshAllPanes: vi.fn(),
+      suspendRendering: vi.fn(),
+      fitAllPanes: vi.fn(),
+      fitAllRevealedPanes: vi.fn(),
+      getActivePane: vi.fn(() => pane),
+      setActivePane: vi.fn()
+    }
+    registerManagerForReset(manager)
+
+    beginHookRender()
+    useTerminalPaneGlobalEffects({
+      tabId: 'tab-1',
+      managerRef: { current: manager as never },
+      containerRef: { current: null },
+      paneTransportsRef: { current: new Map() },
+      isActiveRef: { current: false },
+      isVisibleRef: { current: false },
+      paneCount: 1,
+      isSyncFitEnabled: true,
+      isWorktreeActive: true,
+      toggleExpandPane: vi.fn(),
+      isActive: true,
+      isVisible: true,
+      isChatViewMode: true
+    })
+
+    expect(pane.container.querySelector).toHaveBeenCalledWith('.native-chat-pane-shell')
+    if (covered) {
+      expect(mocks.focusActivePane).not.toHaveBeenCalled()
+    } else {
+      expect(mocks.focusActivePane).toHaveBeenCalledWith(manager)
+    }
+  })
+
   it('keeps visible active-state updates on the light resume path', () => {
     vi.useFakeTimers()
     vi.stubGlobal(
@@ -333,7 +382,6 @@ describe('useTerminalPaneGlobalEffects', () => {
     registerManagerForReset(manager)
     const baseArgs = {
       tabId: 'tab-1',
-      worktreeId: 'wt-1',
       managerRef: { current: manager as never },
       containerRef: { current: null },
       paneTransportsRef: { current: new Map() },
@@ -401,7 +449,6 @@ describe('useTerminalPaneGlobalEffects', () => {
     registerManagerForReset(manager)
     const baseArgs = {
       tabId: 'tab-1',
-      worktreeId: 'wt-1',
       managerRef: { current: manager as never },
       containerRef: { current: null },
       paneTransportsRef: { current: new Map() },
@@ -457,7 +504,6 @@ describe('useTerminalPaneGlobalEffects', () => {
     registerManagerForReset(manager)
     const baseArgs = {
       tabId: 'tab-1',
-      worktreeId: 'wt-1',
       managerRef: { current: manager as never },
       containerRef: { current: null },
       paneTransportsRef: { current: new Map() },
@@ -525,7 +571,8 @@ describe('useTerminalPaneGlobalEffects', () => {
     expect(mocks.fitAndFocusPanes).not.toHaveBeenCalled()
     expect(manager.resetWebglTextureAtlases).not.toHaveBeenCalled()
     expect(manager.refreshAllPanes).not.toHaveBeenCalled()
-    expect(manager.scheduleRevealRepaint).toHaveBeenCalledTimes(1)
+    expect(manager.scheduleRevealRepaint).not.toHaveBeenCalled()
+    expect(manager.scheduleRevealPresent).toHaveBeenCalled()
   })
 
   it('enforces scroll intent after hidden layout changes the viewport', () => {
@@ -550,7 +597,6 @@ describe('useTerminalPaneGlobalEffects', () => {
 
     const baseArgs = {
       tabId: 'tab-1',
-      worktreeId: 'wt-1',
       managerRef: { current: manager as never },
       containerRef: { current: null },
       paneTransportsRef: { current: new Map() },

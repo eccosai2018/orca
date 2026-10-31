@@ -7,6 +7,7 @@ import {
 } from './terminal-pane/terminal-hidden-view-parking'
 import { getTerminalParkingPolicyOverrides } from './terminal-pane/terminal-parking-e2e-overrides'
 import { canWatcherCoverParkedTerminalTab } from './terminal-pane/terminal-parked-tab-watchers'
+import { getHeldTerminalPrewarmWorktrees } from './terminal/terminal-worktree-prewarm'
 import type { TerminalParkingFoundation } from './use-terminal-parking-foundation'
 
 export type TerminalParkingPassCandidates = ReturnType<typeof collectTerminalParkingPassCandidates>
@@ -27,7 +28,8 @@ export function collectTerminalParkingPassCandidates(controller: TerminalParking
     terminalWorktreeHiddenSinceRef,
     terminalWorktreeParkCooldownUntilRef,
     terminalWorktreeParkingTimersRef,
-    workspaceSurfaces
+    workspaceSurfaceIds,
+    workspaceSurfaceIdSet
   } = controller
   const parkingTimers = terminalWorktreeParkingTimersRef.current
   for (const timer of parkingTimers.values()) {
@@ -38,9 +40,8 @@ export function collectTerminalParkingPassCandidates(controller: TerminalParking
   const nowMs = Date.now()
   const overrides = getTerminalParkingPolicyOverrides()
   const portalWorktreeIds = new Set(activityTerminalPortals.map((portal) => portal.worktreeId))
-  const currentWorktreeIds = new Set(workspaceSurfaces.map((workspace) => workspace.id))
   for (const worktreeId of Array.from(terminalWorktreeHiddenSinceRef.current.keys())) {
-    if (!currentWorktreeIds.has(worktreeId) || !mountedWorktreeIdsRef.current.has(worktreeId)) {
+    if (!workspaceSurfaceIdSet.has(worktreeId) || !mountedWorktreeIdsRef.current.has(worktreeId)) {
       terminalWorktreeHiddenSinceRef.current.delete(worktreeId)
       measuringTerminalWorktreeIdsRef.current.delete(worktreeId)
       terminalWorktreeParkCooldownUntilRef.current.delete(worktreeId)
@@ -48,8 +49,7 @@ export function collectTerminalParkingPassCandidates(controller: TerminalParking
   }
 
   const retentionCandidates: TerminalWorktreeColdParkCandidate[] = []
-  for (const workspace of workspaceSurfaces) {
-    const worktreeId = workspace.id
+  for (const worktreeId of workspaceSurfaceIds) {
     if (!mountedWorktreeIdsRef.current.has(worktreeId)) {
       terminalWorktreeHiddenSinceRef.current.delete(worktreeId)
       measuringTerminalWorktreeIdsRef.current.delete(worktreeId)
@@ -114,8 +114,13 @@ export function collectTerminalParkingPassCandidates(controller: TerminalParking
       watcherCoverageByTabId.set(tab.id, covered)
       return covered
     })
+  // Leased prewarm worktrees (hover, keyboard neighbors) stay mounted; the retention budget still applies.
+  const keepWarmWorktreeIds = getHeldTerminalPrewarmWorktrees()
   for (const worktreeId of Array.from(nextParkedTerminalWorktreeIds)) {
-    if (!worktreeTabsAreWatcherCovered(worktreeId, tabsByWorktree[worktreeId] ?? [])) {
+    if (
+      keepWarmWorktreeIds.has(worktreeId) ||
+      !worktreeTabsAreWatcherCovered(worktreeId, tabsByWorktree[worktreeId] ?? [])
+    ) {
       nextParkedTerminalWorktreeIds.delete(worktreeId)
     }
   }

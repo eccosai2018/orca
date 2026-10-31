@@ -1,9 +1,8 @@
 import type { RuntimeTerminalWaitBlockedReason } from '../../shared/runtime-types'
 import { buildTailLines } from './terminal-tail-state'
-import {
-  findActionableTerminalWaitBlockedSignal,
-  TERMINAL_WAIT_BLOCKED_SENTINEL_RE
-} from './terminal-wait-detection'
+import { tailMayContainBlockedSignal } from './terminal-tail-sentinel-index'
+import { findActionableTerminalWaitBlockedSignal } from './terminal-wait-detection'
+import { terminalWaitBlockedSentinelRe } from './agent-state-rules/blocked-text-layer'
 
 export function buildTerminalWaitText(
   lines: string[],
@@ -14,33 +13,33 @@ export function buildTerminalWaitText(
     .map((line) => line.trim())
     .filter(Boolean)
     .join('\n')
-  // Why: the preview is intentionally short, but wait readiness needs the retained tail so ready headers aren't truncated away.
+  // Readiness headers can fall outside the short preview.
   return waitText.length > 0 ? waitText : preview
 }
 
 export type TerminalTailWaitState = {
   waitText: string
   signal: { reason: RuntimeTerminalWaitBlockedReason; index: number } | null
-  // Why: preview is only an empty-tail fallback, recomputed each append, so a preview-derived state can't be reused as the next previous state (gated on fromTail).
+  // Preview fallback changes every append and cannot seed the next cached tail state.
   fromTail: boolean
 }
 
-// Why: runs per PTY chunk (hundreds/sec); only candidate-bearing tails parse the full 256 KiB, and the cached state avoids repeating that work next chunk.
+// Per-chunk caching avoids reparsing 256KiB tails; parse only candidate-bearing tails.
 export function computeTerminalTailWaitState(
   lines: string[],
   partialLine: string,
   preview: string
 ): TerminalTailWaitState {
-  const tailShape = inspectTerminalWaitTail(lines, partialLine)
-  if (!tailShape.fromTail) {
+  const tailInspection = inspectTerminalWaitTail(lines, partialLine)
+  if (!tailInspection.fromTail) {
     return {
       waitText: preview,
       signal: findActionableTerminalWaitBlockedSignal(preview.toLowerCase()),
       fromTail: false
     }
   }
-  if (!tailShape.mayContainBlockedSignal) {
-    // Why: reads waitText only when a signal exists; avoid retaining a rebuilt 256 KiB string in the common case.
+  if (!tailInspection.mayContainBlockedSignal) {
+    // Signal-free chunks need no retained 256KiB waitText rebuild.
     return { waitText: '', signal: null, fromTail: true }
   }
   const tailText = buildTailLines(lines, partialLine)
@@ -60,26 +59,24 @@ function inspectTerminalWaitTail(
   lines: string[],
   partialLine: string
 ): { fromTail: boolean; mayContainBlockedSignal: boolean } {
-  let fromTail = false
-  let mayContainBlockedSignal = false
-  for (const line of lines) {
-    if (!fromTail && line.trim().length > 0) {
-      fromTail = true
-    }
-    if (!mayContainBlockedSignal && TERMINAL_WAIT_BLOCKED_SENTINEL_RE.test(line)) {
-      mayContainBlockedSignal = true
-    }
+  return {
+    fromTail: hasVisibleTailLine(lines) || partialLine.trim().length > 0,
+    // Absence requires a full scan; the index instead checks only newly produced lines.
+    mayContainBlockedSignal:
+      tailMayContainBlockedSignal(lines) || terminalWaitBlockedSentinelRe().test(partialLine)
   }
-  if (!fromTail && partialLine.trim().length > 0) {
-    fromTail = true
-  }
-  if (!mayContainBlockedSignal && TERMINAL_WAIT_BLOCKED_SENTINEL_RE.test(partialLine)) {
-    mayContainBlockedSignal = true
-  }
-  return { fromTail, mayContainBlockedSignal }
 }
 
-// Why: consumes precomputed wait states so full-tail scans aren't repeated per chunk (replaces the former inline double full-tail scan).
+function hasVisibleTailLine(lines: string[]): boolean {
+  for (const line of lines) {
+    if (line.trim().length > 0) {
+      return true
+    }
+  }
+  return false
+}
+
+// Reuse precomputed states to avoid another full-tail scan per chunk.
 export function tailGainedNewerBlockedReason(
   previous: TerminalTailWaitState,
   next: TerminalTailWaitState,
@@ -88,7 +85,7 @@ export function tailGainedNewerBlockedReason(
   if (next.signal === null) {
     return false
   }
-  // Why: permission prompts can split across PTY chunks; stamp when the tail first becomes blocked, or a later prompt follows stale blocked text.
+  // Permission prompts span chunks; stamp first blocking or a newer prompt after stale blocked text.
   if (previous.signal === null) {
     return true
   }

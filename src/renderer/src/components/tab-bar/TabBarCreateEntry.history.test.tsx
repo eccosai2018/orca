@@ -26,8 +26,7 @@ vi.mock('../quick-open-file-list', () => ({
 }))
 vi.mock('@/lib/agent-catalog', () => ({ getAgentCatalog: () => [], AgentIcon: () => null }))
 
-// `hold` pins deferred rows to the query they were built from, standing in for
-// the hook's useDeferredValue so later keystrokes leave them stale.
+// Pin deferred results to their originating query so newer keystrokes leave stale rows visible.
 const historyStoreMock = vi.hoisted(() => ({
   entries: [] as BrowserHistoryEntry[],
   hold: null as string | null,
@@ -169,6 +168,16 @@ describe('TabBarCreateEntry browser history rows', () => {
     expect(rowTexts().some((text) => text.includes('Open page'))).toBe(false)
   })
 
+  it('uses the favicon captured with a history entry', () => {
+    const faviconUrl = 'https://linear.app/favicon.ico'
+    historyStoreMock.entries = [historyEntry({ ...linear, faviconUrl })]
+    mount()
+
+    setQuery('linear')
+
+    expect(container.querySelector<HTMLImageElement>('[role="option"] img')?.src).toBe(faviconUrl)
+  })
+
   it('skips history for a path-shaped query and for a forced search', () => {
     pathLikeMock.value = true
     mount()
@@ -192,7 +201,8 @@ describe('TabBarCreateEntry browser history rows', () => {
         contentType: 'browser',
         pageId: 'page-1',
         workspaceId: 'ws-1',
-        url: 'https://linear.app/acme/team/ORC/active'
+        url: 'https://linear.app/acme/team/ORC/active',
+        faviconUrl: null
       }
     ]
     mount()

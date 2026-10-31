@@ -1,42 +1,60 @@
 import type { OrchestrationDb } from './db'
 import {
-  shouldReleaseOrchestrationPointer,
-  type OrchestrationMessageWaiter
-} from './mailbox-pointer-eligibility'
-import type { OrchestrationMailboxLeaf, OrchestrationMailboxOwner } from './mailbox-owner'
+  MAILBOX_POINTER_ENTER_ATTEMPTED,
+  MAILBOX_POINTER_WRITE_ATTEMPTED
+} from './db/messages/mailbox-pointer-enter-state'
+import {
+  isMailboxTerminalTakingInput,
+  type OrchestrationMailboxOwner,
+  type OrchestrationMailboxTerminal
+} from './mailbox-owner'
 import type {
   OrchestrationMailboxDeliveryFlight,
   OrchestrationMailboxPointerState
 } from './mailbox-pointer-state'
+import type { WriteSettlement } from '../../../shared/pty-write-settlement'
 
-type PointerSubmitDependencies<TWaiter extends OrchestrationMessageWaiter> = {
+type PointerSubmitDependencies = {
   mailboxOwner: OrchestrationMailboxOwner
   state: OrchestrationMailboxPointerState
   getDb: () => OrchestrationDb | null
-  getLeaf: (leafKey: string) => OrchestrationMailboxLeaf | undefined
-  getLeafKey: (tabId: string, leafId: string) => string
-  getMessageWaiters: (mailboxHandle: string) => ReadonlySet<TWaiter> | undefined
+  resolveSubmitTarget: (ptyId: string) => OrchestrationMailboxPointerSubmitTarget | null
   isLeafPtyProvenAbsent: (ptyId: string) => Promise<boolean>
-  writePty: (ptyId: string, data: string) => boolean | Promise<boolean>
+  isPtyAwaitingUserInput: (ptyId: string) => boolean
+  writePty: (ptyId: string, data: string) => WriteSettlement | Promise<WriteSettlement>
   settle: (ptyId: string, flight: OrchestrationMailboxDeliveryFlight) => void
   redrive: (mailboxHandle: string, force?: boolean) => void
 }
 
-export function submitOrchestrationMailboxPointer<TWaiter extends OrchestrationMessageWaiter>(
-  deps: PointerSubmitDependencies<TWaiter>,
+export type OrchestrationMailboxPointerSubmitTarget = {
+  terminal: OrchestrationMailboxTerminal
+  processIncarnation: string
+}
+
+export function submitOrchestrationMailboxPointer(
+  deps: PointerSubmitDependencies,
   input: {
-    leaf: OrchestrationMailboxLeaf
     mailboxHandle: string
     messages: readonly { id: string; type: string }[]
     newestSequence: number
     ptyId: string
     flight: OrchestrationMailboxDeliveryFlight
+    expectedTarget: OrchestrationMailboxPointerSubmitTarget
   }
 ): void {
   let clearAndRedrive = false
+  let redriveClearedPointer = true
   let submitted = false
   let releaseWithoutRedrive = false
   let finalizeReservation = true
+  let preserveAmbiguousDelivery = false
+  let deferredUntilIdle = false
+  let expectedPhase = MAILBOX_POINTER_WRITE_ATTEMPTED
+  const messageIds = input.messages.map((message) => message.id)
+  const reservationTarget = {
+    ptyId: input.ptyId,
+    processIncarnation: input.expectedTarget.processIncarnation
+  }
   void deps
     .isLeafPtyProvenAbsent(input.ptyId)
     .then(async (absent) => {
@@ -48,36 +66,75 @@ export function submitOrchestrationMailboxPointer<TWaiter extends OrchestrationM
         finalizeReservation = false
         return
       }
-      const currentLeaf = deps.getLeaf(deps.getLeafKey(input.leaf.tabId, input.leaf.leafId))
-      if (!currentLeaf || currentLeaf.ptyId !== input.ptyId || !currentLeaf.writable) {
-        clearAndRedrive = true
-      } else if (deps.mailboxOwner.resolve(currentLeaf) !== input.mailboxHandle) {
+      const target = deps.resolveSubmitTarget(input.ptyId)
+      const terminal =
+        target?.terminal.handle === input.expectedTarget.terminal.handle &&
+        target.processIncarnation === input.expectedTarget.processIncarnation
+          ? target.terminal
+          : null
+      const sameMailbox =
+        terminal && deps.mailboxOwner.resolve(terminal, input.mailboxHandle) === input.mailboxHandle
+      const queueSafe = !!terminal && isMailboxTerminalTakingInput(terminal)
+      if (!terminal || !sameMailbox) {
         clearAndRedrive = true
       } else if (
-        currentLeaf.lastAgentStatusObservedLive &&
-        // Once staged, working is queue-safe; idle-only strands Orca-owned text in the composer.
-        (currentLeaf.lastAgentStatus === 'idle' || currentLeaf.lastAgentStatus === 'working')
+        (terminal.lastAgentStatusObservedLive && terminal.lastAgentStatus === null) ||
+        deps.isPtyAwaitingUserInput(input.ptyId)
       ) {
-        if (
-          shouldReleaseOrchestrationPointer(
-            deps.getDb(),
-            input.mailboxHandle,
-            input.messages,
-            deps.getMessageWaiters(input.mailboxHandle)
-          )
-        ) {
+        // A neutral title can outlive the foreground check, and an open dialog would take the
+        // Enter as its answer; no Enter has been attempted yet.
+        deps.state.deferFlightUntilIdle(input.ptyId)
+        input.flight.submitEnter = () => submitOrchestrationMailboxPointer(deps, input)
+        deferredUntilIdle = true
+      } else if (!queueSafe) {
+        releaseWithoutRedrive = true
+      } else {
+        preserveAmbiguousDelivery = true
+        const db = deps.getDb()
+        if (db?.markMailboxPointerEnterAttempted(messageIds, reservationTarget)) {
+          expectedPhase = MAILBOX_POINTER_ENTER_ATTEMPTED
+        } else if (db?.areUnreadMessages(input.mailboxHandle, messageIds) !== false) {
+          // Unread mail lost its claim to an earlier Enter or a release; read mail still gets its Enter.
+          return
+        }
+        const enterSettlement = await deps.writePty(input.ptyId, '\r')
+        submitted = enterSettlement.outcome === 'accepted'
+        if (!deps.state.isCurrentFlight(input.ptyId, input.flight)) {
+          finalizeReservation = false
+          return
+        }
+        // Unverifiable Enter stays attempted: neither delivery nor safe resend is proven.
+        if (enterSettlement.outcome === 'refused') {
           releaseWithoutRedrive = true
-        } else {
-          submitted = await deps.writePty(input.ptyId, '\r')
         }
       }
     })
-    .catch(() => undefined)
+    .catch(() => {
+      if (!preserveAmbiguousDelivery) {
+        clearAndRedrive = true
+        redriveClearedPointer = false
+      }
+    })
     .finally(() => {
+      if (deferredUntilIdle) {
+        return
+      }
       let released = false
+      let rollbackPersisted = true
       if (finalizeReservation) {
         if (clearAndRedrive) {
-          deps.getDb()?.markAsUndelivered(input.messages.map((message) => message.id))
+          try {
+            deps.getDb()?.releaseMailboxPointerEnter(messageIds, reservationTarget, [expectedPhase])
+          } catch {
+            // Runtime teardown can close the DB while this delayed submit is settling.
+            rollbackPersisted = false
+          }
+        } else if (submitted || releaseWithoutRedrive) {
+          try {
+            deps.getDb()?.settleMailboxPointerEnter(messageIds, reservationTarget, [expectedPhase])
+          } catch {
+            // A surviving pending row is revalidated against live agent state after restart.
+          }
         }
         released =
           submitted || clearAndRedrive || releaseWithoutRedrive
@@ -85,7 +142,12 @@ export function submitOrchestrationMailboxPointer<TWaiter extends OrchestrationM
             : deps.state.deactivateWatermark(input.mailboxHandle, input.newestSequence, input.ptyId)
       }
       deps.settle(input.ptyId, input.flight)
-      if (released && !releaseWithoutRedrive) {
+      if (
+        released &&
+        rollbackPersisted &&
+        !releaseWithoutRedrive &&
+        (!clearAndRedrive || redriveClearedPointer)
+      ) {
         deps.redrive(input.mailboxHandle, clearAndRedrive)
       }
     })

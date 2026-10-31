@@ -1,3 +1,4 @@
+import type { ExecutionHostId } from '../../shared/execution-host'
 import type { HostedReviewProvider } from '../../shared/hosted-review'
 import type { HostedReviewCreationProvider } from '../../shared/hosted-review-creation-providers'
 import { isAzureDevOpsReviewCreationAuthenticated } from '../azure-devops/pull-request-creation'
@@ -12,6 +13,7 @@ import {
   glabRepoExecOptions,
   release as releaseGlab
 } from '../gitlab/gl-utils'
+import { hostedReviewSshConnectionId } from './hosted-review-execution-host'
 import {
   getHostedReviewLocalGitOptions,
   type HostedReviewExecutionOptions
@@ -19,17 +21,16 @@ import {
 
 async function isGitHubAuthenticated(
   repoPath: string,
-  connectionId?: string | null,
+  connectionId: string | null,
   options: HostedReviewExecutionOptions = {}
 ): Promise<boolean> {
-  // Why: a non-null enterprise slug already means gh is authenticated there, so skip a redundant probe (#8312).
+  // Enterprise resolution already proved host authentication; avoid a redundant probe (#8312).
   if (await getEnterpriseGitHubRepoSlug(repoPath, connectionId, options)) {
     return true
   }
   await acquire()
   try {
-    // Why: `host` scopes any rate-limit breaker trip to github.com — the host
-    // this probe actually targets — instead of a GH_HOST-derived scope.
+    // Scope rate-limit breaker to the probed github.com host, independent of GH_HOST.
     await ghExecFileAsync(
       ['auth', 'status', '--hostname', 'github.com'],
       connectionId
@@ -46,7 +47,7 @@ async function isGitHubAuthenticated(
 
 async function isGitLabAuthenticated(
   repoPath: string,
-  connectionId?: string | null,
+  connectionId: string | null,
   options: HostedReviewExecutionOptions = {}
 ): Promise<boolean> {
   const projectRef = await getProjectSlug(repoPath, connectionId, options)
@@ -116,12 +117,9 @@ export function reviewCopy(provider: HostedReviewProvider): {
 export async function isProviderAuthenticated(
   provider: HostedReviewCreationProvider,
   repoPath: string,
-  connectionId?: string | null,
+  executionHostId: ExecutionHostId,
   options: HostedReviewExecutionOptions = {}
 ): Promise<boolean> {
-  if (provider === 'gitlab') {
-    return isGitLabAuthenticated(repoPath, connectionId, options)
-  }
   if (provider === 'azure-devops') {
     return isAzureDevOpsReviewCreationAuthenticated()
   }
@@ -129,9 +127,13 @@ export async function isProviderAuthenticated(
     return isGiteaReviewCreationAuthenticated()
   }
   if (provider === 'bitbucket') {
-    // Why: falling through to the GitHub check made Create PR unusable for
-    // anyone with Bitbucket connected but no `gh auth login`.
+    // Bitbucket authentication must not fall through to GitHub login requirements.
     return isBitbucketReviewCreationAuthenticated()
+  }
+  // Only CLI-backed providers need host-routed Git reads; their CLIs run here. Token-backed providers do not touch the repo.
+  const connectionId = hostedReviewSshConnectionId(executionHostId)
+  if (provider === 'gitlab') {
+    return isGitLabAuthenticated(repoPath, connectionId, options)
   }
   return isGitHubAuthenticated(repoPath, connectionId, options)
 }

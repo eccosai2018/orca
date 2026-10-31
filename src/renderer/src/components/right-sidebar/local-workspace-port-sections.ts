@@ -23,9 +23,7 @@ export function getLocalWorkspacePortSections(
         port.owner.repoId === activeRepoId &&
         port.owner.worktreeId !== activeWorktreeId
     ),
-    // Why: the old repo-scoped scan showed listeners from other repos as
-    // External, without workspace-only actions or cross-worktree activation.
-    // Keep that behavior now that the shared scan can attribute them globally.
+    // Preserve old repo scope: other projects stay External without workspace activation/actions despite global attribution.
     externalPorts: ports.flatMap((port) => {
       if (port.kind !== 'workspace') {
         return [port]
@@ -33,6 +31,21 @@ export function getLocalWorkspacePortSections(
       return port.owner.repoId === activeRepoId ? [] : [workspacePortAsExternal(port)]
     })
   }
+}
+
+/** Failed scans retain last-good ports; keep their actions available while the status bar still lists them. */
+export function shouldShowLocalWorkspacePortSections(
+  scan: { unavailableReason?: string } | null | undefined,
+  sections: { activePorts: unknown[]; otherWorkspacePorts: unknown[]; externalPorts: unknown[] }
+): boolean {
+  if (!scan?.unavailableReason) {
+    return true
+  }
+  return (
+    sections.activePorts.length > 0 ||
+    sections.otherWorkspacePorts.length > 0 ||
+    sections.externalPorts.length > 0
+  )
 }
 
 function workspacePortAsExternal(port: WorkspacePort & { kind: 'workspace' }): WorkspacePort {

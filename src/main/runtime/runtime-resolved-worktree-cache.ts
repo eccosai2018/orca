@@ -5,9 +5,10 @@ export type ResolvedWorktreeSnapshot = {
   platformByRepoId: ReadonlyMap<string, NodeJS.Platform>
 }
 
-type ResolvedCache = ResolvedWorktreeSnapshot & { expiresAt: number }
+type ResolvedCache = ResolvedWorktreeSnapshot & { expiresAt: number; inventoryRevision: number }
 type ResolvedInFlight = {
   generation: number
+  inventoryRevision: number
   promise: Promise<ResolvedWorktreeSnapshot>
 }
 export class RuntimeResolvedWorktreeCache {
@@ -15,29 +16,45 @@ export class RuntimeResolvedWorktreeCache {
   private resolvedInFlight: ResolvedInFlight | null = null
   private resolvedGeneration = 0
 
+  get generation(): number {
+    return this.resolvedGeneration
+  }
+
   peek(): ResolvedCache | null {
     return this.resolved
   }
 
+  /** Revision invalidates catalogs missing newly registered repos; TTL alone could wrongly report remote worktrees absent. */
+  isFresh(inventoryRevision: number, now = Date.now()): boolean {
+    return Boolean(
+      this.resolved &&
+      this.resolved.inventoryRevision === inventoryRevision &&
+      this.resolved.expiresAt > now
+    )
+  }
+
   async getSnapshot(
     compute: () => Promise<ResolvedWorktreeSnapshot>,
-    ttlMs: number
+    ttlMs: number,
+    inventoryRevision: number
   ): Promise<ResolvedWorktreeSnapshot> {
-    if (this.resolved && this.resolved.expiresAt > Date.now()) {
+    if (this.resolved && this.isFresh(inventoryRevision)) {
       return this.resolved
     }
     const generation = this.resolvedGeneration
-    if (this.resolvedInFlight?.generation === generation) {
+    if (
+      this.resolvedInFlight?.generation === generation &&
+      this.resolvedInFlight.inventoryRevision === inventoryRevision
+    ) {
       return this.resolvedInFlight.promise
     }
     const promise = compute()
-    this.resolvedInFlight = { generation, promise }
+    this.resolvedInFlight = { generation, inventoryRevision, promise }
     try {
       const result = await promise
       if (generation === this.resolvedGeneration) {
-        // Why stamped on completion, not entry: a compute that spent longer than the TTL would
-        // otherwise publish an already-expired entry, so the next poll recomputes the same slow path.
-        this.resolved = { ...result, expiresAt: Date.now() + ttlMs }
+        // Start TTL on completion or slow computation publishes already-expired entries.
+        this.resolved = { ...result, inventoryRevision, expiresAt: Date.now() + ttlMs }
       }
       return result
     } finally {

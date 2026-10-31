@@ -2,6 +2,7 @@ import { isWindowsAbsolutePathLike } from '../../../shared/cross-platform-path'
 import { getRepoExecutionHostId, LOCAL_EXECUTION_HOST_ID } from '../../../shared/execution-host'
 import type { PersistedState } from '../../../shared/persisted-state-types'
 import { getRepoKind } from '../../../shared/repo-kind'
+import { sshRemotePtyLeaseAllowsReattach } from '../../../shared/ssh-types'
 import { worktreeWorkspaceKey } from '../../../shared/workspace-scope'
 import { FOLDER_WORKSPACE_INSTANCE_SEPARATOR, splitWorktreeId } from '../../../shared/worktree/id'
 import { isWslUncPath } from '../../../shared/wsl-paths'
@@ -13,6 +14,7 @@ import {
 } from '../restoring-sessions/session-worktree-ownership'
 import {
   indexMetadataAliasesForWorktreeIds,
+  isLocallyRemovableWorktreeMetadataRow,
   removeRevalidatedLocalWorktreeMetadata,
   type LocalWorktreeMetadataPruneExpectation,
   type NativeLocalWorktreeMetadataScanExpectation
@@ -39,6 +41,10 @@ function collectPersistedWorkspaceOwners(
     }
   }
   for (const lease of state.sshRemotePtyLeases) {
+    // Unreattachable routing tombstones own no workspace; counting them pinned metadata forever (#17775).
+    if (!sshRemotePtyLeaseAllowsReattach(lease)) {
+      continue
+    }
     add(lease.worktreeId)
   }
   for (const entry of state.migrationUnsupportedPtyEntries) {
@@ -108,6 +114,30 @@ function isValidCandidateId(
   )
 }
 
+/** Prefilter before stat; authoritative deletion rechecks everything, so this cannot widen removal. */
+export function selectProbeableLocalWorktreeMetadataCandidates(
+  state: PersistedState,
+  scan: NativeLocalWorktreeMetadataScanExpectation,
+  platform = process.platform
+): readonly LocalWorktreeMetadataPruneExpectation[] {
+  const candidateIds = new Set(scan.metadata.map(({ worktreeId }) => worktreeId))
+  if (candidateIds.size === 0) {
+    return scan.metadata
+  }
+  const sessionOwners = collectPersistedWorkspaceOwners(state, candidateIds, platform)
+  const aliasesByWorktreeId = indexMetadataAliasesForWorktreeIds(state, candidateIds)
+  return scan.metadata.filter(
+    ({ worktreeId }) =>
+      isValidCandidateId(scan.repo.id, worktreeId, platform) &&
+      !sessionOwners.has(worktreeId) &&
+      isLocallyRemovableWorktreeMetadataRow(
+        state,
+        worktreeId,
+        aliasesByWorktreeId.get(worktreeId) ?? []
+      )
+  )
+}
+
 export function pruneSessionlessMissingLocalWorktreeMetadataForRepo(
   state: PersistedState,
   scan: NativeLocalWorktreeMetadataScanExpectation,
@@ -146,7 +176,7 @@ export function pruneSessionlessMissingLocalWorktreeMetadataForRepo(
     removedIds.push(worktreeId)
   }
   if (removedIds.length > 0) {
-    // Why: a global sweep could delete unrelated unaliased rows from another repo or host.
+    // Limit identity cleanup to removed rows or unrelated repo/host metadata could disappear.
     pruneUnreferencedWorktreeIdentityMeta(state, removedIdentityKeys)
   }
   return removedIds

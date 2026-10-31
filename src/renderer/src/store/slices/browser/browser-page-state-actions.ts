@@ -9,6 +9,7 @@ import {
   normalizeBrowserTitle,
   normalizeUrl
 } from '../browser-page-records'
+import { normalizeBrowserHistoryUrl } from '../../../../../shared/workspace-session-browser-history'
 
 export function createBrowserPageStateActions(
   set: BrowserSliceSet,
@@ -100,6 +101,17 @@ export function createBrowserPageStateActions(
             [workspace.id]: nextPages
           }
         }
+        if (updates.faviconUrl !== undefined && updates.faviconUrl !== page.faviconUrl) {
+          const historyIndex = s.browserUrlHistory.findIndex(
+            (entry) => entry.normalizedUrl === normalizeBrowserHistoryUrl(page.url)
+          )
+          const historyEntry = s.browserUrlHistory[historyIndex]
+          if (historyEntry && historyEntry.faviconUrl !== updates.faviconUrl) {
+            nextState.browserUrlHistory = s.browserUrlHistory.map((entry, index) =>
+              index === historyIndex ? { ...entry, faviconUrl: updates.faviconUrl } : entry
+            )
+          }
+        }
         if (!browserWorkspaceMirrorFieldsEqual(workspace, nextWorkspace)) {
           nextState.browserTabsByWorktree = {
             ...s.browserTabsByWorktree,
@@ -171,32 +183,21 @@ export function createBrowserPageStateActions(
         if (!workspace) {
           return s
         }
-        // Why a document page keeps its blank url here too: this is the third door onto a page's url,
-        // and a document's url is blank by construction. A grant committed here would reach
-        // persistence, the publish boundary and the address bar, exactly as at the other two doors.
+        // Keep document URL blank at navigation sink too; committing grants here leaks to persistence, publication and address bar.
         const nextPageUrl = page.docLocation ? ORCA_BROWSER_BLANK_URL : nextUrl
-        // Why: annotations point at DOM coords of the loaded document; a real URL change invalidates those markers.
-        const shouldClearAnnotations = normalizeUrl(page.url) !== nextPageUrl
         const nextPages = (s.browserPagesByWorkspace[workspace.id] ?? []).map((entry) =>
           entry.id === pageId
             ? {
                 ...entry,
                 url: nextPageUrl,
                 title: normalizeBrowserTitle(entry.title, nextPageUrl, entry.docLocation),
-                // Why not simply true: a document page's guest is inert, so there is nothing to wait
-                // for and the loading affordance would never clear.
+                // Document guests are inert; loading=true would never clear.
                 loading: !entry.docLocation,
                 loadError: options?.preserveLoadError ? entry.loadError : null
               }
             : entry
         )
         const nextWorkspace = mirrorWorkspaceFromActivePage(workspace, nextPages)
-        const nextBrowserAnnotationsByPageId = shouldClearAnnotations
-          ? { ...s.browserAnnotationsByPageId }
-          : s.browserAnnotationsByPageId
-        if (shouldClearAnnotations) {
-          delete nextBrowserAnnotationsByPageId[pageId]
-        }
         return {
           browserPagesByWorkspace: {
             ...s.browserPagesByWorkspace,
@@ -207,10 +208,7 @@ export function createBrowserPageStateActions(
             [workspace.worktreeId]: (s.browserTabsByWorktree[workspace.worktreeId] ?? []).map(
               (tab) => (tab.id === workspace.id ? nextWorkspace : tab)
             )
-          },
-          ...(shouldClearAnnotations
-            ? { browserAnnotationsByPageId: nextBrowserAnnotationsByPageId }
-            : {})
+          }
         }
       })
       get().setBrowserPageCertificateFailure(pageId, null)

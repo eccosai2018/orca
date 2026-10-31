@@ -1,4 +1,3 @@
-import type { PaneManager } from '@/lib/pane-manager/pane-manager'
 import type { AppState } from '@/store/types'
 import type { RuntimeMobileTerminalTheme } from '../../../../shared/runtime-types'
 import type { TabGroupLayoutNode } from '../../../../shared/tab-types'
@@ -29,16 +28,7 @@ export type RuntimeMobileSessionSyncKey = {
   tabsProjection: string
   openFilesProjection: string
   browserProjection: string
-  editorDraftsProjection: string
-}
-
-export type RegisteredTerminalTab = {
-  tabId: string
-  worktreeId: string
-  getManager: () => PaneManager | null
-  getContainer: () => HTMLDivElement | null
-  getPtyIdForPane: (paneId: number) => string | null
-  getTabWideAgentHintLeafId: () => string | null
+  editorDraftsProjection: ReadonlyMap<string, string>
 }
 
 export type OpenFileByWorktreeAndId = Map<string, Map<string, AppState['openFiles'][number]>>
@@ -60,14 +50,45 @@ export type TabsProjectionCache = {
   entries: Map<string, TabsProjectionCacheEntry>
   projection: string
 }
-export type AgentStatusProjectionCacheEntry = {
-  entry: AppState['agentStatusByPaneKey'][string]
+export type OpenFilesProjectionCacheEntry = {
+  file: AppState['openFiles'][number]
   projection: string
 }
-export type AgentStatusProjectionCache = {
-  source: AppState['agentStatusByPaneKey']
-  entries: Map<string, AgentStatusProjectionCacheEntry>
+export type OpenFilesProjectionCache = {
+  source: AppState['openFiles']
+  entries: Map<string, OpenFilesProjectionCacheEntry>
   projection: string
+}
+export type BrowserWorkspacesProjectionCacheEntry = {
+  workspaces: NonNullable<AppState['browserTabsByWorktree'][string]>
+  keyJson: string
+  projection: string
+}
+export type BrowserWorkspacesProjectionCache = {
+  source: AppState['browserTabsByWorktree']
+  entries: Map<string, BrowserWorkspacesProjectionCacheEntry>
+  projection: string
+}
+export type BrowserPagesProjectionCacheEntry = {
+  pages: NonNullable<AppState['browserPagesByWorkspace'][string]>
+  keyJson: string
+  projection: string
+}
+export type BrowserPagesProjectionCache = {
+  source: AppState['browserPagesByWorkspace']
+  entries: Map<string, BrowserPagesProjectionCacheEntry>
+  projection: string
+}
+/** One dirty file's content and last published draft stamp. */
+export type EditorDraftHashCacheEntry = {
+  content: string
+  hash: string
+}
+export type EditorDraftHashCache = {
+  source: AppState['editorDrafts']
+  openFiles: AppState['openFiles']
+  entries: Map<string, EditorDraftHashCacheEntry>
+  hashByFileId: Map<string, string>
 }
 export type MobileSessionAgentStatusByWorktree = ReadonlyMap<
   string,
@@ -82,14 +103,7 @@ export type MobileSessionPublicationInputs = {
   generatedTitlesEnabled: boolean
   terminalTheme: RuntimeMobileTerminalTheme | undefined
 }
-/**
- * Live PaneManager/DOM reads for one mounted terminal tab, captured once per
- * publication.
- *
- * Why: builders read this instead of the registry, so live state the memo
- * cannot witness is unrepresentable — mounted worktrees memoize like the rest
- * instead of rebuilding on every publication.
- */
+/** Capture mounted PaneManager/DOM inputs once per publication; builders cannot consult untracked live state, so mounted snapshots memoize too. */
 export type MountedTerminalSurfaceCapture = {
   paneLeafIds: readonly string[]
   hasLiveActivePane: boolean
@@ -99,14 +113,10 @@ export type MountedTerminalSurfaceCapture = {
   ptyIdByNumericPaneId: ReadonlyMap<number, string | null>
   tabWideAgentHintLeafId: string | null
 }
-/**
- * One worktree's complete mobile-snapshot input set.
- *
- * Why: every builder below takes this instead of `AppState`, so the compiler —
- * not a reviewer — proves what a worktree's snapshot actually depends on.
- */
+/** Complete per-worktree inputs constrain builders at compile time rather than relying on review. */
 export type MobileSessionWorktreeInputs = {
   worktreeId: string
+  worktreeInstanceId: string | undefined
   terminalTabs: AppState['tabsByWorktree'][string]
   browserWorkspaces: AppState['browserTabsByWorktree'][string]
   unifiedTabs: AppState['unifiedTabsByWorktree'][string]

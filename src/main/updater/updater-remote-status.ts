@@ -1,5 +1,4 @@
 import { app } from 'electron'
-import { is } from '@electron-toolkit/utils'
 import type { UpdateCheckOptions, UpdateStatus } from '../../shared/update-status-types'
 import type {
   RemoteServerUpdateInstallResult,
@@ -7,17 +6,17 @@ import type {
   RemoteServerUpdateSupport
 } from '../../shared/remote-server-update'
 import { hasServeUpdateSupervisor } from '../serve-update-handoff'
+import { getLinuxPackageType } from '../linux-update-package-type'
 import { UpdaterNudge } from './updater-nudge'
 import type { UpdateInstallMode } from './updater-state'
 
-/** Exposes updater state to runtime RPC callers without leaking internal mutators. */
 export abstract class UpdaterRemoteStatus extends UpdaterNudge {
   protected getUpdateStatus(): UpdateStatus {
     return this.currentStatus
   }
 
   protected getRemoteServerUpdateSupport(): RemoteServerUpdateSupport {
-    if (!app.isPackaged || is.dev) {
+    if (!app.isPackaged) {
       return {
         installMode: this.updateInstallMode,
         automatic: false,
@@ -31,7 +30,13 @@ export abstract class UpdaterRemoteStatus extends UpdaterNudge {
         reason: 'updater-unavailable'
       }
     }
-    if (this.updateInstallMode === 'unsupported-headless-serve') {
+    const linuxPackageType = getLinuxPackageType()
+    if (
+      this.updateInstallMode === 'unsupported-headless-serve' ||
+      linuxPackageType === 'deb' ||
+      linuxPackageType === 'rpm' ||
+      linuxPackageType === 'unusable'
+    ) {
       return {
         installMode: this.updateInstallMode,
         automatic: false,

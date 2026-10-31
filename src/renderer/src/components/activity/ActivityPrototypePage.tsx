@@ -1,8 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { useShallow } from 'zustand/react/shallow'
-import { useSidebarResize } from '@/hooks/useSidebarResize'
 import { useAppStore } from '@/store'
-import { getRepoMapFromState, getWorktreeMapFromState } from '@/store/selectors'
+import { useSidebarResize } from '@/hooks/useSidebarResize'
 import {
   setActivityTerminalPortals,
   type ActivityTerminalPortalTarget
@@ -11,15 +9,10 @@ import {
   reconcileActivityPortalThreads,
   resolveActivityPortalSwap
 } from './activity-portal-thread-reconciliation'
-import { buildActivityEvents } from './activity-event-builder'
-import { buildAgentPaneThreads } from './activity-thread-builder'
-import {
-  activityThreadMatchesSearchQuery,
-  buildActivityThreadGroups,
-  isActivitySearchQueryTooLarge
-} from './activity-thread-grouping'
+import { useAgentPaneThreads } from './use-agent-pane-threads'
 import { handleActivityFilterFocusShortcut } from './activity-filter-focus-shortcut'
-import { createActivityThreadActions } from './activity-thread-actions'
+import { hasActivityThreadWorkspace } from './activity-thread-actions'
+import { useActivityThreadActionBindings } from './use-activity-thread-action-bindings'
 import { ActivityThreadListPane } from './activity-thread-list-pane'
 import { ActivityThreadDetailPane } from './activity-thread-detail-pane'
 import {
@@ -27,29 +20,37 @@ import {
   useActivityTerminalLoadingLabel,
   useActivityTerminalPortalStatus
 } from './activity-terminal-portal-status'
-import type {
-  ActivityGroupBy,
-  ActivityTerminalPortalSlotId,
-  ThreadReadFilter
-} from './activity-thread-types'
+import type { ActivityTerminalPortalSlotId } from './activity-thread-types'
+import { addAppKeyListener, removeAppKeyListener } from '@/lib/app-keyboard-router'
+import {
+  selectDetectedWorktreesByRepo,
+  selectFolderWorkspaces,
+  selectWorktreesByRepo
+} from '@/store/workspace-record-selectors'
 
 export * from './activity-prototype-page-exports'
 
 export default function ActivityPrototypePage(): React.JSX.Element {
-  const [readFilter, setReadFilter] = useState<ThreadReadFilter>('all')
-  const [groupBy, setGroupBy] = useState<ActivityGroupBy>('status')
   const [query, setQuery] = useState('')
   const activityFilterInputRef = useRef<HTMLInputElement | null>(null)
-  // Why: bounds auto mark-read to one acknowledgement per selected thread turn.
+  // Auto-acknowledge each selected thread turn once.
   const autoAcknowledgedTurnRef = useRef<string | null>(null)
-  const [compactMode, setCompactMode] = useState(false)
+  // Share persisted read-filter preference with the sidebar agent list.
+  const readFilter = useAppStore((s) => s.agentsReadFilter)
+  const setReadFilter = useAppStore((s) => s.setAgentsReadFilter)
+  const groupBy = useAppStore((s) => s.agentsGroupBy)
+  const setGroupBy = useAppStore((s) => s.setAgentsGroupBy)
+  const compactMode = useAppStore((s) => s.agentsCompactMode)
+  const setCompactMode = useAppStore((s) => s.setAgentsCompactMode)
+  const showChildAgents = useAppStore((s) => s.agentsShowChildAgents)
+  const setShowChildAgents = useAppStore((s) => s.setAgentsShowChildAgents)
   const [selectedPaneKey, setSelectedPaneKey] = useState<string | null>(null)
   const [displayedPaneKey, setDisplayedPaneKey] = useState<string | null>(null)
   const [activePortalSlotId, setActivePortalSlotId] =
     useState<ActivityTerminalPortalSlotId>('primary')
   const [primaryPortalTargetEl, setPrimaryPortalTargetEl] = useState<HTMLElement | null>(null)
   const [secondaryPortalTargetEl, setSecondaryPortalTargetEl] = useState<HTMLElement | null>(null)
-  // Why (default width): thread cards are the primary surface; 480px lets prompts fill line-clamp-3 and keeps the per-card actions readable.
+  // 480px keeps thread prompts/actions readable as the primary surface.
   const [threadListWidth, setThreadListWidth] = useState(480)
   const {
     containerRef: threadListRef,
@@ -64,86 +65,30 @@ export default function ActivityPrototypePage(): React.JSX.Element {
     setWidth: setThreadListWidth
   })
 
-  const storeData = useAppStore(
-    useShallow((s) => ({
-      agentStatusByPaneKey: s.agentStatusByPaneKey,
-      migrationUnsupportedByPtyId: s.migrationUnsupportedByPtyId,
-      retainedAgentsByPaneKey: s.retainedAgentsByPaneKey,
-      tabsByWorktree: s.tabsByWorktree,
-      worktreeMap: getWorktreeMapFromState(s),
-      repoMap: getRepoMapFromState(s),
-      acknowledgedAgentsByPaneKey: s.acknowledgedAgentsByPaneKey,
-      acknowledgeAgents: s.acknowledgeAgents,
-      unacknowledgeAgents: s.unacknowledgeAgents,
-      generatedTitlesEnabled: s.settings?.tabAutoGenerateTitle === true
-    }))
-  )
-  // Why: agentStatusEpoch is a dep (not used in the body) so the memo recomputes when freshness boundaries expire even without new PTY data.
-  const agentStatusEpoch = useAppStore((s) => s.agentStatusEpoch)
-
-  const { events: allEvents, liveAgentByPaneKey } = useMemo(
-    () =>
-      buildActivityEvents({
-        agentStatusByPaneKey: storeData.agentStatusByPaneKey,
-        migrationUnsupportedByPtyId: storeData.migrationUnsupportedByPtyId,
-        retainedAgentsByPaneKey: storeData.retainedAgentsByPaneKey,
-        tabsByWorktree: storeData.tabsByWorktree,
-        worktreeMap: storeData.worktreeMap,
-        repoMap: storeData.repoMap,
-        acknowledgedAgentsByPaneKey: storeData.acknowledgedAgentsByPaneKey,
-        // Why: Date.now() is read in the memo body (not a dep) so stale-decay recomputes when agentStatusEpoch ticks, not on wall-clock time.
-        now: Date.now()
-      }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [storeData, agentStatusEpoch]
-  )
-
-  const allThreads = useMemo(
-    () =>
-      buildAgentPaneThreads({
-        events: allEvents,
-        liveAgentByPaneKey,
-        generatedTitlesEnabled: storeData.generatedTitlesEnabled
-      }),
-    [allEvents, liveAgentByPaneKey, storeData.generatedTitlesEnabled]
-  )
-  const selectedPaneKeyIsLive =
-    selectedPaneKey === null || allThreads.some((thread) => thread.paneKey === selectedPaneKey)
-  const effectiveSelectedPaneKey = selectedPaneKeyIsLive ? selectedPaneKey : null
+  const {
+    storeData,
+    allThreads,
+    selectedPaneKeyIsLive,
+    effectiveSelectedPaneKey,
+    visibleThreads,
+    markAllReadThreads,
+    visibleThreadGroups
+  } = useAgentPaneThreads({ query, readFilter, groupBy, selectedPaneKey, showChildAgents })
   if (!selectedPaneKeyIsLive) {
-    // Why: rows disappear when agent retention or tab state changes; clear stale selection before detail/portal rendering targets it.
+    // Clear vanished pane selection before detail/portal rendering targets it.
     setSelectedPaneKey(null)
   }
-
-  const visibleThreads = useMemo(() => {
-    const normalizedQuery = isActivitySearchQueryTooLarge(query) ? null : query.trim().toLowerCase()
-    return allThreads.filter((thread) => {
-      // Why: keep the just-selected thread visible after auto-mark-read flips it to read, else unread-only mode makes the clicked row vanish from the list.
-      if (
-        readFilter === 'unread' &&
-        !thread.unread &&
-        thread.paneKey !== effectiveSelectedPaneKey
-      ) {
-        return false
-      }
-      if (normalizedQuery === null) {
-        return false
-      }
-      return activityThreadMatchesSearchQuery({ thread, searchQuery: normalizedQuery })
-    })
-  }, [allThreads, readFilter, query, effectiveSelectedPaneKey])
-  const visibleThreadGroups = useMemo(
-    () => buildActivityThreadGroups(visibleThreads, groupBy),
-    [visibleThreads, groupBy]
-  )
 
   const selectedThread = effectiveSelectedPaneKey
     ? (allThreads.find((thread) => thread.paneKey === effectiveSelectedPaneKey) ?? null)
     : null
   const selectedTabId = selectedThread?.tab.id ?? null
-  // Why: repo-less terminal buckets can produce Activity rows, but the workspace Terminal tree only portals real worktrees.
+  const selectedWorktreeAvailable = selectedThread
+    ? hasActivityThreadWorkspace(selectedThread, storeData)
+    : false
+  // Repo-less terminal buckets can have activity rows but no workspace Terminal portal.
   const selectedHasLiveTab =
-    selectedThread && selectedTabId && storeData.worktreeMap.has(selectedThread.worktree.id)
+    selectedThread && selectedTabId && selectedWorktreeAvailable
       ? (storeData.tabsByWorktree[selectedThread.worktree.id] ?? []).some(
           (tab) => tab.id === selectedTabId
         )
@@ -152,8 +97,11 @@ export default function ActivityPrototypePage(): React.JSX.Element {
     ? (allThreads.find((thread) => thread.paneKey === displayedPaneKey) ?? null)
     : null
   const displayedTabId = displayedThread?.tab.id ?? null
+  const displayedWorktreeAvailable = displayedThread
+    ? hasActivityThreadWorkspace(displayedThread, storeData)
+    : false
   const displayedHasLiveTab =
-    displayedThread && displayedTabId && storeData.worktreeMap.has(displayedThread.worktree.id)
+    displayedThread && displayedTabId && displayedWorktreeAvailable
       ? (storeData.tabsByWorktree[displayedThread.worktree.id] ?? []).some(
           (tab) => tab.id === displayedTabId
         )
@@ -197,8 +145,7 @@ export default function ActivityPrototypePage(): React.JSX.Element {
     setSecondaryPortalTargetEl(target)
   }, [])
 
-  // Why (no flash): anchor the portal to the selected thread's ids; selectThread's multi-step store update can briefly reflect a stale "last active tab" (wrong-terminal flash).
-  // Why useMemo: stable descriptor identity so subscribers keep React.memo bail-outs; inactive descriptor stages the next terminal at the same size.
+  // Anchor portals to selected thread IDs to avoid stale-last-tab flashes. Memoize descriptors for subscriber bailouts and stage the next terminal at the same size.
   const portalDescriptors = useMemo(() => {
     const descriptors: ActivityTerminalPortalTarget[] = []
     if (visibleThread && activePortalTargetEl) {
@@ -235,7 +182,7 @@ export default function ActivityPrototypePage(): React.JSX.Element {
     visibleThread
   ])
 
-  // Why: swap-staged makes the displayed thread selected, so this branch cannot repeat by itself.
+  // A staged swap selects its displayed thread, preventing self-repetition.
   useLayoutEffect(() => {
     const swap = resolveActivityPortalSwap({
       selectedThread,
@@ -251,7 +198,7 @@ export default function ActivityPrototypePage(): React.JSX.Element {
       return
     }
     if (swap?.kind === 'swap-staged') {
-      // Why: a stale selected pane must swap to the unavailable state, not leave the previous pane visible under the new row.
+      // Swap stale selections to unavailable state rather than showing the previous pane under a new row.
       setActivePortalSlotId(inactivePortalSlotId)
       setDisplayedPaneKey(swap.paneKey)
       return
@@ -270,16 +217,14 @@ export default function ActivityPrototypePage(): React.JSX.Element {
     visibleThread
   ])
 
-  // Why useLayoutEffect (not useEffect): publish before paint so Terminal's portal subscriber rerenders in the same commit, else the stale target flashes on screen.
-  // Why no cleanup-to-null on each change: it forces the portal through null on every switch, flashing the workspace pane; null only on unmount (effect below).
-  // oxlint-disable-next-line react-doctor/no-derived-state-effect -- Why: this publishes portal descriptors to Terminal's external portal store before paint.
+  // Publish before paint to prevent stale-target flashes. Clear only on unmount; per-change null transitions flash the workspace pane.
   useLayoutEffect(() => {
     setActivityTerminalPortals(portalDescriptors)
   }, [portalDescriptors])
 
   const setActivityPageRef = useCallback((node: HTMLDivElement | null): void => {
     if (!node) {
-      // Why: portal cleanup must happen only on page unmount; clearing on descriptor changes flashes the workspace pane behind the activity slot.
+      // Clear portals only on unmount to avoid flashing behind changed descriptors.
       setActivityTerminalPortals([])
     }
   }, [])
@@ -294,17 +239,50 @@ export default function ActivityPrototypePage(): React.JSX.Element {
       })
     }
 
-    window.addEventListener('keydown', focusActivityFilter, { capture: true })
-    return () => window.removeEventListener('keydown', focusActivityFilter, { capture: true })
+    addAppKeyListener('keydown', focusActivityFilter)
+    return () => removeAppKeyListener('keydown', focusActivityFilter)
   }, [activePortalTargetEl, inactivePortalTargetEl])
 
-  const { hasUnreadThreads, markThreadUnread, selectThread, jumpToWorkspace, markAllThreadsRead } =
-    createActivityThreadActions({
-      allThreads,
-      acknowledgeAgents: storeData.acknowledgeAgents,
-      unacknowledgeAgents: storeData.unacknowledgeAgents,
-      setSelectedPaneKey
-    })
+  const {
+    markThreadRead,
+    markThreadUnread,
+    markThreadsRead,
+    markThreadsUnread,
+    selectThread,
+    jumpToWorkspace,
+    markAllThreadsRead,
+    hasUnreadThreads,
+    hasCompletedThreads,
+    handleClearCompleted
+  } = useActivityThreadActionBindings({
+    visibleThreads,
+    markAllReadThreads,
+    acknowledgeAgents: storeData.acknowledgeAgents,
+    unacknowledgeAgents: storeData.unacknowledgeAgents,
+    setSelectedPaneKey
+  })
+
+  const worktreesByRepo = selectWorktreesByRepo(storeData)
+  const detectedWorktreesByRepo = selectDetectedWorktreesByRepo(storeData)
+  const folderWorkspaces = selectFolderWorkspaces(storeData)
+
+  const canJumpToWorkspace = useCallback(
+    (thread: Parameters<typeof hasActivityThreadWorkspace>[0]) =>
+      hasActivityThreadWorkspace(thread, {
+        worktreesByRepo,
+        detectedWorktreesByRepo,
+        folderWorkspaces,
+        floatingWorkspacePath: storeData.floatingWorkspacePath,
+        defaultHostId: storeData.defaultHostId
+      }),
+    [
+      worktreesByRepo,
+      detectedWorktreesByRepo,
+      folderWorkspaces,
+      storeData.floatingWorkspacePath,
+      storeData.defaultHostId
+    ]
+  )
 
   useEffect(() => {
     if (
@@ -315,10 +293,7 @@ export default function ActivityPrototypePage(): React.JSX.Element {
     ) {
       return
     }
-    // Why (React #185): a turn stamped ahead of this clock (SSH/remote execution host) can never
-    // have its unread cleared, and each retry lands on a later millisecond, so acknowledgeAgents'
-    // `prev < now` guard rewrites the ack map every time and re-enters here forever through
-    // storeData. Auto-read is once per turn, not a retry.
+    // Remote turn clocks may exceed local acknowledgement time and trigger endless store rewrites (React #185). Auto-read once per turn, never retry by unread status.
     const autoAcknowledgeKey = `${selectedThread.paneKey}:${selectedThread.latestTimestamp}`
     if (autoAcknowledgedTurnRef.current === autoAcknowledgeKey) {
       return
@@ -341,7 +316,7 @@ export default function ActivityPrototypePage(): React.JSX.Element {
     visibleThread
   ])
 
-  // Why (page padding): no top/horizontal padding so the page reaches the window edges; the titlebar and the right pane's title row (pt-2) supply the top spacing.
+  // Page content reaches window edges; titlebars supply top spacing.
   return (
     <div ref={setActivityPageRef} className="flex h-full min-h-0 flex-col bg-background pb-3">
       <main className="flex min-h-0 flex-1 overflow-hidden">
@@ -356,25 +331,30 @@ export default function ActivityPrototypePage(): React.JSX.Element {
           readFilter={readFilter}
           onReadFilterChange={setReadFilter}
           compactMode={compactMode}
+          showChildAgents={showChildAgents}
           hasUnreadThreads={hasUnreadThreads}
           onCompactModeChange={setCompactMode}
+          onShowChildAgentsChange={setShowChildAgents}
           onMarkAllThreadsRead={markAllThreadsRead}
+          hasCompletedThreads={hasCompletedThreads}
+          onClearCompleted={handleClearCompleted}
           visibleThreadGroups={visibleThreadGroups}
           visibleThreadCount={visibleThreads.length}
           selectedPaneKey={selectedThread?.paneKey ?? null}
           onSelectThread={selectThread}
           onJumpToWorkspace={jumpToWorkspace}
+          onMarkThreadRead={markThreadRead}
           onMarkThreadUnread={markThreadUnread}
-          canJumpToWorkspace={(thread) => storeData.worktreeMap.has(thread.worktree.id)}
+          onMarkThreadsRead={markThreadsRead}
+          onMarkThreadsUnread={markThreadsUnread}
+          canJumpToWorkspace={canJumpToWorkspace}
           isThreadListResizing={isThreadListResizing}
           onResizeStart={onResizeStart}
         />
         <ActivityThreadDetailPane
           selectedThread={selectedThread}
           selectedHasLiveTab={Boolean(selectedHasLiveTab)}
-          selectedWorktreeAvailable={Boolean(
-            selectedThread && storeData.worktreeMap.has(selectedThread.worktree.id)
-          )}
+          selectedWorktreeAvailable={selectedWorktreeAvailable}
           visibleThread={visibleThread}
           stagedThread={stagedThread}
           activePortalSlotId={activePortalSlotId}

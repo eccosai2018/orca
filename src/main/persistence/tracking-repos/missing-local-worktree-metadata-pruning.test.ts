@@ -3,6 +3,7 @@ import { getDefaultPersistedState, getDefaultWorkspaceSession } from '../../../s
 import type { PersistedState } from '../../../shared/persisted-state-types'
 import type { Project } from '../../../shared/project-types'
 import type { Repo } from '../../../shared/repo-types'
+import type { SshRemotePtyLease } from '../../../shared/ssh-types'
 import { worktreeWorkspaceKey } from '../../../shared/workspace-scope'
 import type { WorktreeMeta } from '../../../shared/worktree/meta-types'
 import {
@@ -285,6 +286,62 @@ describe('pruneSessionlessMissingLocalWorktreeMetadataForRepo', () => {
       mutate(state, worktreeId)
       expect(pruneCaptured(state, scan, [worktreeId])).toEqual([])
     }
+  })
+
+  // Route-retired tombstones must not pin metadata forever (#17775).
+  it('does not let route-retired SSH leases pin a metadata row', () => {
+    const state = makeState()
+    const liveIds = Array.from({ length: 3 }, (_, i) => `${REPO_ID}::/workspace/live-${i}`)
+    const terminatedIds = Array.from({ length: 5 }, (_, i) => `${REPO_ID}::/workspace/closed-${i}`)
+    const supersededIds = Array.from({ length: 4 }, (_, i) => `${REPO_ID}::/workspace/lost-${i}`)
+    const recycledIds = [`${REPO_ID}::/workspace/recycled`]
+    const allIds = [...liveIds, ...terminatedIds, ...supersededIds, ...recycledIds]
+    for (const worktreeId of allIds) {
+      state.worktreeMeta[worktreeId] = makeMeta(worktreeId)
+    }
+    const lease = (worktreeId: string, index: number, extra: Partial<SshRemotePtyLease>) => ({
+      targetId: 'builder',
+      ptyId: `pty-${index}`,
+      worktreeId,
+      createdAt: 1,
+      updatedAt: 1,
+      ...extra
+    })
+    state.sshRemotePtyLeases = [
+      ...liveIds.map((id, i) => lease(id, i, { state: 'detached' })),
+      ...terminatedIds.map((id, i) => lease(id, 100 + i, { state: 'terminated' })),
+      ...supersededIds.map((id, i) =>
+        lease(id, 200 + i, { state: 'expired', supersededBy: 'pty-9' })
+      ),
+      ...recycledIds.map((id, i) => lease(id, 300 + i, { state: 'expired', relayIdRecycled: true }))
+    ] as never
+
+    const scan = capture(state)
+
+    expect(pruneCaptured(state, scan, allIds).sort()).toEqual(
+      [...terminatedIds, ...supersededIds, ...recycledIds].sort()
+    )
+    expect(Object.keys(state.worktreeMeta).sort()).toEqual([...liveIds].sort())
+  })
+
+  // Plain expiry proves only route loss; recoverable panes retain ownership.
+  it('keeps a metadata row pinned by an unmarked expired lease', () => {
+    const state = makeState()
+    const worktreeId = `${REPO_ID}::/workspace/orphaned`
+    state.worktreeMeta[worktreeId] = makeMeta(worktreeId)
+    const scan = capture(state)
+    state.sshRemotePtyLeases = [
+      {
+        targetId: 'builder',
+        ptyId: 'pty',
+        worktreeId,
+        state: 'expired',
+        createdAt: 1,
+        updatedAt: 1
+      }
+    ]
+
+    expect(pruneCaptured(state, scan, [worktreeId])).toEqual([])
   })
 
   it('preserves canonically equivalent session and top-level owners', () => {

@@ -1,3 +1,4 @@
+import { gitLabApiFor } from '@/runtime/gitlab-owner-api'
 import { useCallback } from 'react'
 import { toast } from 'sonner'
 import { getCommentBodySubmitState } from '@/lib/comment-body-submit-state'
@@ -7,6 +8,7 @@ import type { GitLabAssignableUser, GitLabWorkItem } from '../../../../shared/gi
 import { dedupeGitLabUsers, showGitLabMutationError } from '../gitlab-item-dialog-parts'
 import type { GitLabDialogRepoSelector } from './gitlab-item-dialog-types'
 import type { GitLabItemDialogState } from './use-gitlab-item-dialog-state'
+import { codeHostErrorText } from '@/lib/code-host-error-copy'
 
 export function useGitLabReviewActions(
   item: GitLabWorkItem | null,
@@ -36,7 +38,7 @@ export function useGitLabReviewActions(
     }
     setReviewerOptionsLoading(true)
     try {
-      const users = await window.api.gl.listAssignableUsers(repoSelector)
+      const users = await gitLabApiFor(repoSelector).listAssignableUsers(repoSelector)
       if (mountedRef.current) {
         setReviewerOptions(dedupeGitLabUsers(users))
       }
@@ -49,7 +51,14 @@ export function useGitLabReviewActions(
         setReviewerOptionsLoading(false)
       }
     }
-  }, [mountedRef, repoSelector, reviewerOptions, reviewerOptionsLoading])
+  }, [
+    mountedRef,
+    repoSelector,
+    reviewerOptions,
+    reviewerOptionsLoading,
+    setReviewerOptions,
+    setReviewerOptionsLoading
+  ])
 
   const handleSetReviewers = useCallback(
     async (nextReviewers: GitLabAssignableUser[]): Promise<void> => {
@@ -70,7 +79,7 @@ export function useGitLabReviewActions(
       }
       setReviewerUpdating(true)
       try {
-        const result = await window.api.gl.updateMRReviewers({
+        const result = await gitLabApiFor(repoSelector).updateMRReviewers({
           ...repoSelector,
           iid: item.number,
           reviewerIds,
@@ -89,7 +98,7 @@ export function useGitLabReviewActions(
           )
           useAppStore.getState().recordFeatureInteraction('gitlab-tasks')
         } else {
-          toast.error(result.error)
+          toast.error(codeHostErrorText(result))
         }
       } catch (error) {
         if (mountedRef.current) {
@@ -101,7 +110,16 @@ export function useGitLabReviewActions(
         }
       }
     },
-    [details, item, mountedRef, repoSelector]
+    [
+      details,
+      item,
+      mountedRef,
+      repoSelector,
+      setDetails,
+      setReviewerDraftId,
+      setReviewerOptions,
+      setReviewerUpdating
+    ]
   )
 
   const handleSubmitInlineComment = useCallback(async (): Promise<void> => {
@@ -140,7 +158,7 @@ export function useGitLabReviewActions(
     }
     setInlineCommentSubmitting(true)
     try {
-      const result = await window.api.gl.addMRInlineComment({
+      const result = await gitLabApiFor(repoSelector).addMRInlineComment({
         ...repoSelector,
         iid: item.number,
         projectRef: details.item.projectRef ?? item.projectRef ?? null,
@@ -167,7 +185,7 @@ export function useGitLabReviewActions(
           translate('auto.components.GitLabItemDialog.60c13320c4', 'Inline comment added')
         )
       } else {
-        toast.error(result.error)
+        toast.error(codeHostErrorText(result))
       }
     } catch (error) {
       if (mountedRef.current) {
@@ -185,7 +203,10 @@ export function useGitLabReviewActions(
     inlineCommentLine,
     item,
     mountedRef,
-    repoSelector
+    repoSelector,
+    setDetails,
+    setInlineCommentBody,
+    setInlineCommentSubmitting
   ])
 
   const handleResolveDiscussion = useCallback(
@@ -195,7 +216,7 @@ export function useGitLabReviewActions(
       }
       setResolvingThreadId(threadId)
       try {
-        const res = await window.api.gl.resolveMRDiscussion({
+        const res = await gitLabApiFor(repoSelector).resolveMRDiscussion({
           ...repoSelector,
           iid: item.number,
           discussionId: threadId,
@@ -216,7 +237,7 @@ export function useGitLabReviewActions(
             useAppStore.getState().recordFeatureInteraction('gitlab-tasks')
           }
         } else if (mountedRef.current) {
-          toast.error(res.error)
+          toast.error(codeHostErrorText(res))
         }
       } catch (error) {
         if (mountedRef.current) {
@@ -228,7 +249,7 @@ export function useGitLabReviewActions(
         }
       }
     },
-    [item, repoSelector, mountedRef]
+    [item, repoSelector, mountedRef, setDetails, setResolvingThreadId]
   )
 
   return {

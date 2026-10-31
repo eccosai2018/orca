@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vite
 import type { ManagedPaneInternal } from './pane-manager-types'
 import { schedulePaneRevealPresent, schedulePaneRevealRepaint } from './pane-reveal-repaint'
 import { registerLivePaneManager, unregisterLivePaneManager } from './pane-manager-registry'
-import { resetTerminalWebglSuggestion, resetWebglTextureAtlas } from './pane-webgl-renderer'
+import {
+  primeTerminalWebglAddon,
+  resetTerminalWebglSuggestion,
+  resetWebglTextureAtlas
+} from './pane-webgl-renderer'
 import { PaneManager } from './pane-manager'
 
 type FakeWebglAddon = { clearTextureAtlas: ReturnType<typeof vi.fn> }
@@ -33,6 +37,7 @@ function createPane(options: { webglAddon?: FakeWebglAddon | null } = {}): Manag
     hasComplexScriptOutput: false,
     webglAddon: (options.webglAddon ?? null) as never,
     ligaturesAddon: null,
+    imageAddon: null,
     fitResizeObserver: null,
     pendingObservedFitRafId: null,
     pendingWebglRefreshRafId: null,
@@ -95,7 +100,8 @@ describe('schedulePaneRevealRepaint', () => {
     }
   }
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    await primeTerminalWebglAddon()
     resetTerminalWebglSuggestion()
     rafQueue = []
     vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
@@ -119,8 +125,7 @@ describe('schedulePaneRevealRepaint', () => {
     registerPaneManager(() => [pane])
     schedulePaneRevealRepaint(() => [pane])
 
-    // First frame: reveal layout may still be in flight; redraw requests fired
-    // here can be dropped by the renderer without retry.
+    // First-frame reveal layout can cause redraw requests to be dropped without retry.
     flushFrame()
     expect(webglAddon.clearTextureAtlas).not.toHaveBeenCalled()
     expect(pane.terminal.refresh).not.toHaveBeenCalled()
@@ -249,8 +254,7 @@ describe('schedulePaneRevealRepaint', () => {
 
   describe('schedulePaneRevealPresent', () => {
     it('presents the settled buffer without wiping the shared glyph atlas', () => {
-      // The plain-refocus path must NOT clear the atlas — the clear is a
-      // same-config shared wipe that re-arms the mid-stream page-merge race.
+      // Refocus must preserve the shared atlas; clearing re-arms the mid-stream page-merge race.
       const webglAddon = { clearTextureAtlas: vi.fn() }
       const pane = createPane({ webglAddon })
       schedulePaneRevealPresent(() => [pane])

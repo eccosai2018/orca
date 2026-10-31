@@ -18,6 +18,7 @@ export {
   type ComputerWindowListWindow
 } from './computer-use-runtime-types'
 export type {
+  BrowserActionEffects,
   BrowserBackResult,
   BrowserCaptureStartResult,
   BrowserCaptureStopResult,
@@ -60,6 +61,7 @@ export type {
   BrowserScreencastErrorResult,
   BrowserScreencastReadyResult,
   BrowserScreencastResult,
+  BrowserScreenshotAnnotation,
   BrowserScreenshotResult,
   BrowserScrollResult,
   BrowserSelectAllResult,
@@ -94,6 +96,7 @@ export type {
 export {
   BROWSER_UNAVAILABLE_ERROR_CODE,
   browserUnavailableMessage,
+  CLIENT_NAVIGATION_PUBLICATION_EPOCH_SUFFIX,
   HEADLESS_RUNTIME_WINDOW_ID,
   UNPUBLISHED_WORKTREE_PUBLICATION_EPOCH
 } from './runtime-session-contracts'
@@ -115,6 +118,7 @@ export type {
   RuntimeDesktopWindowStatus,
   RuntimeGraphStatus,
   RuntimeMobileSessionAgentTab,
+  RuntimeMobileSessionAgentTabStatus,
   RuntimeMobileSessionBrowserTab,
   RuntimeMobileSessionClientTab,
   RuntimeMobileSessionCreateTerminalResult,
@@ -132,6 +136,7 @@ export type {
   RuntimeMobileSessionTerminalClientTab,
   RuntimeMobileSessionTerminalTab,
   RuntimeMobileTerminalTheme,
+  RuntimeMountedLeaf,
   RuntimeNativeChatLaunchDraftResolution,
   RuntimeRendererSyncWindowGraph,
   RuntimeSessionTabCloseReason,
@@ -160,8 +165,11 @@ export type {
   RuntimeTerminalOrphanTopologyGroup,
   RuntimeTerminalOrphanTopologyTab,
   RuntimeTerminalPresentation,
+  RuntimeTerminalPromptDelivery,
+  RuntimeTerminalPromptStage,
   RuntimeTerminalRead,
   RuntimeTerminalRename,
+  RuntimeTerminalSetPaneTitle,
   RuntimeTerminalResolvePane,
   RuntimeTerminalSend,
   RuntimeTerminalShow,
@@ -177,6 +185,7 @@ export type {
   RuntimeTerminalWait,
   RuntimeTerminalWaitBlockedReason,
   RuntimeTerminalWaitCondition,
+  RuntimeWorktreeTerminalCloseResult,
   RuntimeWorktreeTerminalSleepResult
 } from './runtime-terminal-contracts'
 export type {
@@ -196,6 +205,7 @@ export type {
   RuntimeWorktreePsUnchangedResult,
   RuntimeWorktreeRecord,
   RuntimeWorktreeRemoveResult,
+  RuntimeWorktreeSetResult,
   RuntimeWorktreeStatus
 } from './runtime-worktree-contracts'
 export type {

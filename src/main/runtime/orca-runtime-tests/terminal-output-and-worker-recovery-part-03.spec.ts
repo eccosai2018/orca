@@ -1,6 +1,8 @@
+import { makeRuntimeOrchestrationDb } from '../runtime-orchestration-db.test-fixture'
+import { withDurableRuntimeStore } from '../runtime-durable-store-fixture'
 import { describe, expect, it, vi } from 'vitest'
+import { ORCA_LAYOUT_OWNER_IS_MAIN } from '../../../shared/layout-owner-switch'
 import { OrcaRuntimeService, getDefaultWorkspaceSession } from '../orca-runtime-test-mocks.spec'
-import type { OrchestrationDb } from '../orchestration/db'
 import type { WorkspaceSessionState } from '../orca-runtime-test-mocks.spec'
 import {
   HEADLESS_LEAF_ID,
@@ -17,7 +19,7 @@ import {
 } from '../orca-runtime-test-scenario-builders.spec'
 
 describe('OrcaRuntimeService', () => {
-  it('retries renderer reveal before clearing an adopted legacy worker resume fence', async () => {
+  it('retries renderer reveal before clearing an adopted legacy worker sleeping record', async () => {
     const workerPaneKey = `legacy-worker:${HEADLESS_LEAF_ID}`
     const incarnationId = '44444444-4444-4444-8444-444444444444'
     const session: WorkspaceSessionState = {
@@ -40,27 +42,28 @@ describe('OrcaRuntimeService', () => {
     }
     const { runtimeStore, getSession } = makeRuntimeStoreWithWorkspaceSession(session)
     const runtime = new OrcaRuntimeService(
-      { ...runtimeStore, flushOrThrow: vi.fn() } as never,
+      withDurableRuntimeStore({ ...runtimeStore, flushOrThrow: vi.fn() }),
       undefined,
       { canRecoverPersistentLocalPtys: () => true }
     )
-    runtime.setOrchestrationDb({
-      getActiveDispatchForTerminal: () => undefined,
-      listLegacyWorkerTerminalRecoveryRows: () => [
-        {
-          dispatch_id: 'dispatch-reveal-retry',
-          task_id: 'task-reveal-retry',
-          dispatch_status: 'completed',
-          contract_version: 0,
-          assignee_handle: 'term_reveal_retry',
-          assignee_pane_key: workerPaneKey,
-          process_incarnation: `pty-reveal-retry:${incarnationId}`,
-          worker_state: 'ready',
-          worktree_id: TEST_WORKTREE_ID,
-          agent_terminal_handle: 'term_reveal_retry'
-        }
-      ]
-    } as unknown as OrchestrationDb)
+    const orchestrationDb = makeRuntimeOrchestrationDb()
+    vi.spyOn(orchestrationDb, 'listSessionDispatchesForPresentation').mockImplementation(() => [])
+    vi.spyOn(orchestrationDb, 'getActiveDispatchForTerminal').mockImplementation(() => undefined)
+    vi.spyOn(orchestrationDb, 'listLegacyWorkerTerminalRecoveryRows').mockImplementation(() => [
+      {
+        dispatch_id: 'dispatch-reveal-retry',
+        task_id: 'task-reveal-retry',
+        dispatch_status: 'completed',
+        contract_version: 0,
+        assignee_handle: 'term_reveal_retry',
+        assignee_pane_key: workerPaneKey,
+        process_incarnation: `pty-reveal-retry:${incarnationId}`,
+        worker_state: 'ready',
+        worktree_id: TEST_WORKTREE_ID,
+        agent_terminal_handle: 'term_reveal_retry'
+      }
+    ])
+    runtime.setOrchestrationDb(orchestrationDb)
     runtime.setPtyController({
       write: vi.fn(() => true),
       kill: vi.fn(() => true),
@@ -106,7 +109,7 @@ describe('OrcaRuntimeService', () => {
     expect(resolveLegacyWorkerTerminalRecovery).toHaveBeenCalledWith(workerPaneKey, 'adopted')
   })
 
-  it('keeps a revealed worker fenced until its exact renderer graph is published', async () => {
+  it('defers a revealed worker until its exact renderer graph is published', async () => {
     vi.useFakeTimers()
     try {
       const harness = makePostRevealWorkerRecoveryHarness(() => true)
@@ -288,7 +291,7 @@ describe('OrcaRuntimeService', () => {
     }
   })
 
-  it('keeps recovery fenced when the renderer omits the exact reveal identity', async () => {
+  it('defers recovery when the renderer omits the exact reveal identity', async () => {
     const harness = makePostRevealWorkerRecoveryHarness(() => false)
     harness.revealTerminalSession.mockResolvedValue({ tabId: 'legacy-post-reveal' })
 
@@ -392,6 +395,10 @@ describe('OrcaRuntimeService', () => {
     ).toBeUndefined()
     expect(harness.getSession().tabsByWorktree[TEST_WORKTREE_ID]).toEqual([])
     expect(harness.getSession().terminalLayoutsByTabId['legacy-post-reveal']).toBeUndefined()
+    if (ORCA_LAYOUT_OWNER_IS_MAIN) {
+      // The window draws main's layout, which no longer holds the tab: its next graph omits it.
+      harness.runtime.syncWindowGraph(TEST_WINDOW_ID, { tabs: [], leaves: [] })
+    }
     const runtimeState = harness.runtime as unknown as {
       tabs: Map<string, unknown>
       leaves: Map<string, unknown>
@@ -417,7 +424,7 @@ describe('OrcaRuntimeService', () => {
     )
   })
 
-  it('keeps the legacy worker resume fence in memory when persistence fails', async () => {
+  it('keeps the legacy worker sleeping record in memory when persistence fails', async () => {
     const workerPaneKey = `legacy-worker:${HEADLESS_LEAF_ID}`
     const incarnationId = '99999999-9999-4999-8999-999999999999'
     const session: WorkspaceSessionState = {
@@ -451,26 +458,27 @@ describe('OrcaRuntimeService', () => {
       return durableWrite.promise
     })
     const runtime = new OrcaRuntimeService(
-      { ...runtimeStore, flushPendingOrThrowAsync } as never,
+      withDurableRuntimeStore({ ...runtimeStore, flushPendingOrThrowAsync }),
       undefined,
       { canRecoverPersistentLocalPtys: () => true }
     )
-    runtime.setOrchestrationDb({
-      listLegacyWorkerTerminalRecoveryRows: () => [
-        {
-          dispatch_id: 'dispatch-persistence-failure',
-          task_id: 'task-persistence-failure',
-          dispatch_status: 'completed',
-          contract_version: 0,
-          assignee_handle: 'term_persistence_failure',
-          assignee_pane_key: workerPaneKey,
-          process_incarnation: `pty-persistence-failure:${incarnationId}`,
-          worker_state: 'ready',
-          worktree_id: TEST_WORKTREE_ID,
-          agent_terminal_handle: 'term_persistence_failure'
-        }
-      ]
-    } as unknown as OrchestrationDb)
+    const orchestrationDb = makeRuntimeOrchestrationDb()
+    vi.spyOn(orchestrationDb, 'listSessionDispatchesForPresentation').mockImplementation(() => [])
+    vi.spyOn(orchestrationDb, 'listLegacyWorkerTerminalRecoveryRows').mockImplementation(() => [
+      {
+        dispatch_id: 'dispatch-persistence-failure',
+        task_id: 'task-persistence-failure',
+        dispatch_status: 'completed',
+        contract_version: 0,
+        assignee_handle: 'term_persistence_failure',
+        assignee_pane_key: workerPaneKey,
+        process_incarnation: `pty-persistence-failure:${incarnationId}`,
+        worker_state: 'ready',
+        worktree_id: TEST_WORKTREE_ID,
+        agent_terminal_handle: 'term_persistence_failure'
+      }
+    ])
+    runtime.setOrchestrationDb(orchestrationDb)
     runtime.setPtyController({
       write: vi.fn(() => true),
       kill: vi.fn(() => true),
@@ -526,9 +534,7 @@ describe('OrcaRuntimeService', () => {
     })
     expect(flushPendingOrThrowAsync).toHaveBeenCalledTimes(2)
     expect(revealTerminalSession).toHaveBeenCalledOnce()
-    expect(
-      getSession().sleepingAgentSessionsByPaneKey?.[workerPaneKey]?.automaticResumeBlockedBy
-    ).toBe('legacy-orchestration-worker')
+    expect(getSession().sleepingAgentSessionsByPaneKey?.[workerPaneKey]).toBeDefined()
     expect(getSession().sleepingAgentSessionsByPaneKey?.[concurrentPaneKey]?.tabId).toBe(
       'concurrent-tab'
     )

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { RpcContext } from '../core'
+import { eraseRpcMethods, type RpcContext } from '../core'
 import { TERMINAL_METHODS } from './terminal'
 
 describe('terminal.create RPC idempotency', () => {
@@ -15,7 +15,9 @@ describe('terminal.create RPC idempotency', () => {
         run: (worktree: string | undefined, handle: string | undefined) => Promise<typeof terminal>
       ) => run('id:worktree-1', 'term_stable')
     )
-    const method = TERMINAL_METHODS.find((candidate) => candidate.name === 'terminal.create')
+    const method = eraseRpcMethods(TERMINAL_METHODS).find(
+      (candidate) => candidate.name === 'terminal.create'
+    )
     if (!method) {
       throw new Error('terminal.create method missing')
     }
@@ -44,7 +46,8 @@ describe('terminal.create RPC idempotency', () => {
       'id:worktree-1',
       'mutation-1',
       false,
-      expect.any(Function)
+      expect.any(Function),
+      { wslUserAct: true }
     )
     expect(createTerminal).toHaveBeenCalledWith(
       'id:worktree-1',
@@ -73,7 +76,9 @@ describe('terminal.create RPC idempotency', () => {
         run: (worktree: string | undefined, handle: string | undefined) => Promise<typeof terminal>
       ) => run('id:worktree-1', undefined)
     )
-    const method = TERMINAL_METHODS.find((candidate) => candidate.name === 'terminal.create')
+    const method = eraseRpcMethods(TERMINAL_METHODS).find(
+      (candidate) => candidate.name === 'terminal.create'
+    )
     if (!method) {
       throw new Error('terminal.create method missing')
     }
@@ -114,7 +119,9 @@ describe('terminal.create RPC idempotency', () => {
         run: (worktree: string | undefined, handle: string | undefined) => Promise<unknown>
       ) => run('id:worktree-1', undefined)
     )
-    const method = TERMINAL_METHODS.find((candidate) => candidate.name === 'terminal.create')
+    const method = eraseRpcMethods(TERMINAL_METHODS).find(
+      (candidate) => candidate.name === 'terminal.create'
+    )
     if (!method) {
       throw new Error('terminal.create method missing')
     }

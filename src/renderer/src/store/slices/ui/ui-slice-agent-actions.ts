@@ -2,16 +2,19 @@ import type { UISlice, UISliceGet, UISliceSet } from './ui-slice-contract'
 import { formatAgentTypeLabel, agentKindForAgentType } from '../../../lib/agent-status'
 import {
   deriveRunningAgentSendTargets,
-  resolveRunningAgentSendTarget
+  resolveRunningAgentSendTarget,
+  runningAgentMessageTarget,
+  runningAgentSendTargetAgentType
 } from '../../../lib/running-agent-targets'
 import { translate } from '@/i18n/i18n'
-import {
-  collectAcknowledgedAgentNotificationId,
-  createAgentSendTargetModeInstanceId,
-  latestAgentTurnTimestamp,
-  resolvePaneKeyWorktreeIdFromTabs,
-  usableTimestamp
-} from './ui-slice-agent-helpers'
+import { createUiActivityActions } from './ui-slice-activity-actions'
+
+let agentSendTargetModeInstanceCounter = 0
+
+function createAgentSendTargetModeInstanceId(): string {
+  agentSendTargetModeInstanceCounter += 1
+  return `${Date.now()}:${agentSendTargetModeInstanceCounter}`
+}
 
 export function createUiAgentActions(
   set: UISliceSet,
@@ -33,8 +36,13 @@ export function createUiAgentActions(
   | 'acknowledgedAgentsByPaneKey'
   | 'acknowledgeAgents'
   | 'unacknowledgeAgents'
+  | 'activityClearedAtByPaneKey'
+  | 'applyActivityClearedAt'
+  | 'manuallyUnreadTurnsByPaneKey'
+  | 'clearManuallyUnreadTurns'
 > {
   return {
+    ...createUiActivityActions(set, get),
     sidebarOpen: true,
     sidebarWidth: 280,
     toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
@@ -68,6 +76,8 @@ export function createUiAgentActions(
         targets.some((target) => target.status === 'eligible') &&
         (previousMode?.id !== args.id || previousMode.worktreeId !== args.worktreeId)
       ) {
+        // Why switch: the send targets render on workspace cards, not activity rows.
+        get().setSidebarBody('workspaces')
         get().revealWorktreeInSidebar(args.worktreeId, { behavior: 'auto', highlight: true })
       }
     },
@@ -112,12 +122,17 @@ export function createUiAgentActions(
       }),
     sendPromptToSidebarAgentTarget: async (paneKey) => {
       const mode = get().agentSendPopoverTargetMode
-      if (!mode || mode.status === 'sending') {
+      // An empty prompt has nothing to send: every note may already be on its way.
+      if (!mode || mode.status === 'sending' || !mode.prompt.trim()) {
         return false
       }
 
       const target = resolveRunningAgentSendTarget(get(), mode.worktreeId, paneKey)
-      if (!target || target.status !== 'eligible' || !target.ptyId) {
+      if (
+        !target ||
+        target.status !== 'eligible' ||
+        (target.kind === 'terminal' && !target.ptyId)
+      ) {
         // Why: eligibility can drop after the menu opened; keep the picker open (row title explains) rather than adding toast noise.
         return false
       }
@@ -136,17 +151,24 @@ export function createUiAgentActions(
           : s
       )
 
-      const label = formatAgentTypeLabel(target.entry.agentType)
-      const { activeAgentNotesSendFailureMessage, sendNotesToActiveAgentSession } =
-        await import('@/lib/active-agent-note-send')
-      const result = await sendNotesToActiveAgentSession({
+      const agentType = runningAgentSendTargetAgentType(target)
+      const label = formatAgentTypeLabel(agentType)
+      const [{ activeAgentNotesSendFailureMessage }, { sendMessageToAgent }] = await Promise.all([
+        import('@/lib/active-agent-note-send'),
+        import('@/lib/agent-message-send')
+      ])
+      const sending = sendMessageToAgent({
         worktreeId: mode.worktreeId,
         prompt: mode.prompt,
-        noteTarget: { tabId: target.tabId, leafId: target.leafId }
-      }).catch((error) => {
-        console.error('Failed to send notes to sidebar agent target:', error)
-        return { status: 'no-active-terminal' as const }
+        target: runningAgentMessageTarget(target)
+      }).catch(() => {
+        console.error('Failed to send notes to sidebar agent target:', {
+          code: 'runtime-unverifiable'
+        })
+        return { status: 'status-unavailable' as const, code: 'runtime-unverifiable' as const }
       })
+      mode.onPromptHandedOff?.(sending)
+      const result = await sending
 
       const stillCurrent = (): boolean => {
         const current = get().agentSendPopoverTargetMode
@@ -154,7 +176,10 @@ export function createUiAgentActions(
       }
 
       if (result.status !== 'sent') {
-        const message = activeAgentNotesSendFailureMessage(result.status, { explicitTarget: true })
+        const message = activeAgentNotesSendFailureMessage(result.status, {
+          explicitTarget: true,
+          code: result.code
+        })
         set((s) =>
           s.agentSendPopoverTargetMode?.id === mode.id &&
           s.agentSendPopoverTargetMode.instanceId === mode.instanceId
@@ -181,15 +206,14 @@ export function createUiAgentActions(
         return false
       }
 
-      // Delivery ack, telemetry, and toast belong to the completed send, not to the
-      // picker that launched it; only the close below is scoped to this instance.
+      // Completed-send delivery/telemetry/toast outlive the picker; only closing it is scoped to this instance.
       mode.onPromptDelivered?.()
       const [{ toast }, { track }] = await Promise.all([
         import('sonner'),
         import('@/lib/telemetry')
       ])
       track('agent_prompt_sent', {
-        agent_kind: agentKindForAgentType(target.entry.agentType),
+        agent_kind: agentKindForAgentType(agentType),
         launch_source: mode.launchSource,
         request_kind: 'followup'
       })
@@ -198,82 +222,6 @@ export function createUiAgentActions(
       )
       get().closeAgentSendPopoverTargetMode(mode.id, mode.instanceId)
       return true
-    },
-
-    acknowledgedAgentsByPaneKey: {},
-    acknowledgeAgents: (paneKeys) => {
-      const notificationIdsToDismiss = new Set<string>()
-      set((s) => {
-        if (paneKeys.length === 0) {
-          return s
-        }
-        const now = Date.now()
-        const migrationUnsupported = Object.values(s.migrationUnsupportedByPtyId ?? {})
-        // Why: only reallocate if an ack advances; compare prev<stamp not !== — the stamp ticks every ms and !== would rewrite the map every call.
-        let next: Record<string, number> | null = null
-        for (const key of paneKeys) {
-          const prev = s.acknowledgedAgentsByPaneKey[key] ?? 0
-          // Why not plain Date.now(): a remote/SSH execution host can stamp a turn ahead of this clock,
-          // and every unread rule is `ackAt < turnTimestamp`. A behind-the-turn ack can never clear the
-          // row, so its auto-ack effect re-fires on each new millisecond forever (React #185).
-          let stamp = now
-          const liveEntry = s.agentStatusByPaneKey?.[key]
-          if (liveEntry) {
-            collectAcknowledgedAgentNotificationId({
-              ids: notificationIdsToDismiss,
-              worktreeId: resolvePaneKeyWorktreeIdFromTabs(s, key) ?? liveEntry.worktreeId,
-              paneKey: key,
-              stateStartedAt: liveEntry.stateStartedAt,
-              previousAckAt: prev
-            })
-            stamp = Math.max(stamp, latestAgentTurnTimestamp(liveEntry))
-          }
-          const retained = s.retainedAgentsByPaneKey?.[key]
-          if (retained) {
-            collectAcknowledgedAgentNotificationId({
-              ids: notificationIdsToDismiss,
-              worktreeId: retained.worktreeId,
-              paneKey: key,
-              stateStartedAt: retained.entry.stateStartedAt,
-              previousAckAt: prev
-            })
-            stamp = Math.max(stamp, latestAgentTurnTimestamp(retained.entry))
-          }
-          for (const unsupported of migrationUnsupported) {
-            // Why: Activity synthesizes a blocked row from this entry, stamped by the pane's host like any turn.
-            if (unsupported.paneKey === key) {
-              stamp = Math.max(stamp, usableTimestamp(unsupported.updatedAt))
-            }
-          }
-          if (prev < stamp) {
-            if (next === null) {
-              next = { ...s.acknowledgedAgentsByPaneKey }
-            }
-            next[key] = stamp
-          }
-        }
-        return next ? { acknowledgedAgentsByPaneKey: next } : s
-      })
-      const notificationIds = [...notificationIdsToDismiss]
-      if (notificationIds.length > 0 && typeof window !== 'undefined') {
-        void window.api?.notifications?.dismiss?.(notificationIds)
-      }
-    },
-    unacknowledgeAgents: (paneKeys) =>
-      set((s) => {
-        if (paneKeys.length === 0) {
-          return s
-        }
-        let next: Record<string, number> | null = null
-        for (const key of paneKeys) {
-          if (s.acknowledgedAgentsByPaneKey[key] !== undefined) {
-            if (next === null) {
-              next = { ...s.acknowledgedAgentsByPaneKey }
-            }
-            delete next[key]
-          }
-        }
-        return next ? { acknowledgedAgentsByPaneKey: next } : s
-      })
+    }
   }
 }

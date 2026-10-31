@@ -6,13 +6,14 @@ import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
   getCombinedDiffFileTreeEntriesMatchingStaticFilters,
-  getEntryExtension
+  getEntryExtension,
+  NO_EXTENSION_KEY
 } from './combined-diff-file-tree-filter'
 import type {
   CombinedDiffFileTreeEntry,
   CombinedDiffFileTreeMode
 } from '../resolve-changes/combined-diff-section-identity'
-import { CombinedDiffFileTreeRow } from './combined-diff-file-tree-row'
+import { CombinedDiffFileTreeRows } from './combined-diff-file-tree-rows'
 import { useCombinedDiffFileTreeResize } from './use-combined-diff-file-tree-resize'
 import { translate } from '@/i18n/i18n'
 import {
@@ -20,12 +21,21 @@ import {
   buildCombinedDiffUncommittedTreeGroups,
   flattenCombinedDiffTreeRoots,
   getViewedCombinedDiffTreeVisibility,
+  type CombinedDiffTreeGroup,
   type CombinedDiffTreeNode
 } from './combined-diff-file-tree-model'
+
+// Collapsed panels use stable empty inputs to skip hidden tree construction and flattening.
+const EMPTY_TREE_ENTRIES: readonly CombinedDiffFileTreeEntry[] = Object.freeze([])
+const EMPTY_TREE_EXTENSIONS: readonly string[] = Object.freeze([])
+const EMPTY_UNCOMMITTED_TREE_GROUPS: CombinedDiffTreeGroup[] = []
+const EMPTY_TREE_ROOTS: CombinedDiffTreeNode[] = []
+const EMPTY_TREE_ROWS: CombinedDiffTreeNode[] = []
 
 export function CombinedDiffFileTree({
   mode,
   worktreePath,
+  sourceWorkspaceId,
   entries,
   sectionIndexByKey,
   activeSectionKey,
@@ -36,6 +46,7 @@ export function CombinedDiffFileTree({
 }: {
   mode: CombinedDiffFileTreeMode
   worktreePath: string
+  sourceWorkspaceId?: string
   entries: readonly CombinedDiffFileTreeEntry[]
   sectionIndexByKey: ReadonlyMap<string, number>
   activeSectionKey: string | null
@@ -50,6 +61,8 @@ export function CombinedDiffFileTree({
   const [query, setQuery] = React.useState('')
   const [excludedExtensions, setExcludedExtensions] = React.useState<Set<string>>(() => new Set())
   const [includeViewed, setIncludeViewed] = React.useState(true)
+  // Use state so virtualized lists receive the scroller on their first mount.
+  const [listScrollElement, setListScrollElement] = React.useState<HTMLDivElement | null>(null)
   const { handleResizeKeyDown, handleResizeStart, maxWidth, minWidth, treeRef, width } =
     useCombinedDiffFileTreeResize(collapsed)
   const toggleDirectory = React.useCallback((key: string) => {
@@ -65,19 +78,23 @@ export function CombinedDiffFileTree({
   }, [])
 
   const availableExtensions = React.useMemo(
-    () => Array.from(new Set(entries.map(getEntryExtension))).sort(),
-    [entries]
+    () =>
+      collapsed
+        ? EMPTY_TREE_EXTENSIONS
+        : Array.from(new Set(entries.map(getEntryExtension))).sort(),
+    [collapsed, entries]
   )
-  // Why: viewed/loading state changes for one section must not invalidate the path filter or tree
-  // construction. It is applied below as a visibility overlay.
+  // Apply viewed/loading changes as an overlay without rebuilding path filters or tree structure.
   const structurallyFilteredEntries = React.useMemo(
     () =>
-      getCombinedDiffFileTreeEntriesMatchingStaticFilters({
-        entries,
-        query,
-        excludedExtensions
-      }),
-    [entries, excludedExtensions, query]
+      collapsed
+        ? EMPTY_TREE_ENTRIES
+        : getCombinedDiffFileTreeEntriesMatchingStaticFilters({
+            entries,
+            query,
+            excludedExtensions
+          }),
+    [collapsed, entries, excludedExtensions, query]
   )
   const toggleExtension = React.useCallback((extension: string) => {
     setExcludedExtensions((prev) => {
@@ -100,37 +117,38 @@ export function CombinedDiffFileTree({
 
   const uncommittedTreeGroups = React.useMemo(
     () =>
-      mode === 'all' || mode === 'uncommitted'
+      !collapsed && (mode === 'all' || mode === 'uncommitted')
         ? buildCombinedDiffUncommittedTreeGroups(structurallyFilteredEntries)
-        : [],
-    [mode, structurallyFilteredEntries]
+        : EMPTY_UNCOMMITTED_TREE_GROUPS,
+    [collapsed, mode, structurallyFilteredEntries]
   )
   const branchTreeRoots = React.useMemo(
     () =>
-      mode === 'all' || mode === 'branch' || mode === 'commit'
+      !collapsed && (mode === 'all' || mode === 'branch' || mode === 'commit')
         ? buildCombinedDiffBranchTreeRoots(mode, structurallyFilteredEntries)
-        : [],
-    [mode, structurallyFilteredEntries]
+        : EMPTY_TREE_ROOTS,
+    [collapsed, mode, structurallyFilteredEntries]
   )
-  // Why: the viewed overlay below replaces these rows entirely when viewed files are hidden, so
-  // flattening the unfiltered tree there is pure dead work.
+  // When viewed files are hidden, the visibility overlay replaces these rows; skip unused flattening.
   const uncommittedRowsByArea = React.useMemo(() => {
     const rowsByArea = new Map<string, CombinedDiffTreeNode[]>()
-    if (!includeViewed) {
+    if (collapsed || !includeViewed) {
       return rowsByArea
     }
     for (const group of uncommittedTreeGroups) {
       rowsByArea.set(group.area, flattenCombinedDiffTreeRoots(group.roots, collapsedDirectoryKeys))
     }
     return rowsByArea
-  }, [collapsedDirectoryKeys, includeViewed, uncommittedTreeGroups])
+  }, [collapsed, collapsedDirectoryKeys, includeViewed, uncommittedTreeGroups])
   const branchRows = React.useMemo(
     () =>
-      includeViewed ? flattenCombinedDiffTreeRoots(branchTreeRoots, collapsedDirectoryKeys) : [],
-    [branchTreeRoots, collapsedDirectoryKeys, includeViewed]
+      !collapsed && includeViewed
+        ? flattenCombinedDiffTreeRoots(branchTreeRoots, collapsedDirectoryKeys)
+        : EMPTY_TREE_ROWS,
+    [branchTreeRoots, collapsed, collapsedDirectoryKeys, includeViewed]
   )
   const uncommittedVisibleRowsByArea = React.useMemo(() => {
-    if (includeViewed) {
+    if (collapsed || includeViewed) {
       return null
     }
     const rowsByArea = new Map<string, ReturnType<typeof getViewedCombinedDiffTreeVisibility>>()
@@ -146,10 +164,17 @@ export function CombinedDiffFileTree({
       )
     }
     return rowsByArea
-  }, [collapsedDirectoryKeys, includeViewed, mode, uncommittedTreeGroups, viewedSectionKeys])
+  }, [
+    collapsed,
+    collapsedDirectoryKeys,
+    includeViewed,
+    mode,
+    uncommittedTreeGroups,
+    viewedSectionKeys
+  ])
   const branchVisibleRows = React.useMemo(
     () =>
-      includeViewed
+      collapsed || includeViewed
         ? null
         : getViewedCombinedDiffTreeVisibility({
             roots: branchTreeRoots,
@@ -157,7 +182,7 @@ export function CombinedDiffFileTree({
             mode,
             viewedSectionKeys
           }),
-    [branchTreeRoots, collapsedDirectoryKeys, includeViewed, mode, viewedSectionKeys]
+    [branchTreeRoots, collapsed, collapsedDirectoryKeys, includeViewed, mode, viewedSectionKeys]
   )
   const visibleEntryCount = includeViewed
     ? structurallyFilteredEntries.length
@@ -171,10 +196,20 @@ export function CombinedDiffFileTree({
     return null
   }
 
+  const sharedRowProps = {
+    mode,
+    worktreePath,
+    sourceWorkspaceId,
+    activeSectionKey,
+    sectionIndexByKey,
+    collapsedDirectoryKeys,
+    scrollElement: listScrollElement,
+    onToggleDirectory: toggleDirectory,
+    onNavigate
+  }
+
   return (
-    // Why: this column must be height-bounded so the file list, not the page,
-    // owns overflow when review diffs have more files than fit on screen.
-    // Why: useSidebarResize owns the inline width so a rerender mid-drag can't snap it back.
+    // Bound height so the file list owns overflow; useSidebarResize owns width to prevent rerenders snapping an active drag.
     <aside
       ref={treeRef}
       className="relative flex min-h-0 shrink-0 flex-col overflow-hidden border-r border-border bg-background"
@@ -245,7 +280,14 @@ export function CombinedDiffFileTree({
                       <Check
                         className={cn('size-3.5 shrink-0', checked ? 'opacity-100' : 'opacity-0')}
                       />
-                      <span className="min-w-0 flex-1 truncate">{extension}</span>
+                      <span className="min-w-0 flex-1 truncate">
+                        {extension === NO_EXTENSION_KEY
+                          ? translate(
+                              'auto.components.editor.CombinedDiffViewer.noExtension',
+                              '(no extension)'
+                            )
+                          : extension}
+                      </span>
                     </button>
                   )
                 })}
@@ -283,7 +325,7 @@ export function CombinedDiffFileTree({
           </Popover>
         </div>
       </div>
-      <div className="min-h-0 flex-1 overflow-auto py-1 scrollbar-sleek">
+      <div ref={setListScrollElement} className="min-h-0 flex-1 overflow-auto py-1 scrollbar-sleek">
         {visibleEntryCount === 0 ? (
           <div className="px-3 py-6 text-center text-xs text-muted-foreground">
             {translate(
@@ -309,20 +351,11 @@ export function CombinedDiffFileTree({
                   <div className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-[0.05em] text-muted-foreground">
                     {group.label}
                   </div>
-                  {rows.map((node) => (
-                    <CombinedDiffFileTreeRow
-                      key={node.key}
-                      node={node}
-                      mode={mode}
-                      worktreePath={worktreePath}
-                      activeSectionKey={activeSectionKey}
-                      sectionIndexByKey={sectionIndexByKey}
-                      isCollapsed={collapsedDirectoryKeys.has(node.key)}
-                      visibleFileCount={visibleFileCounts?.get(node.key)}
-                      onToggleDirectory={toggleDirectory}
-                      onNavigate={onNavigate}
-                    />
-                  ))}
+                  <CombinedDiffFileTreeRows
+                    rows={rows}
+                    visibleFileCounts={visibleFileCounts}
+                    {...sharedRowProps}
+                  />
                 </div>
               )
             })}
@@ -334,38 +367,20 @@ export function CombinedDiffFileTree({
                     'Committed on Branch'
                   )}
                 </div>
-                {(branchVisibleRows?.rows ?? branchRows).map((node) => (
-                  <CombinedDiffFileTreeRow
-                    key={node.key}
-                    node={node}
-                    mode={mode}
-                    worktreePath={worktreePath}
-                    activeSectionKey={activeSectionKey}
-                    sectionIndexByKey={sectionIndexByKey}
-                    isCollapsed={collapsedDirectoryKeys.has(node.key)}
-                    visibleFileCount={branchVisibleRows?.visibleFileCounts.get(node.key)}
-                    onToggleDirectory={toggleDirectory}
-                    onNavigate={onNavigate}
-                  />
-                ))}
+                <CombinedDiffFileTreeRows
+                  rows={branchVisibleRows?.rows ?? branchRows}
+                  visibleFileCounts={branchVisibleRows?.visibleFileCounts}
+                  {...sharedRowProps}
+                />
               </div>
             ) : null}
           </>
         ) : (
-          (branchVisibleRows?.rows ?? branchRows).map((node) => (
-            <CombinedDiffFileTreeRow
-              key={node.key}
-              node={node}
-              mode={mode}
-              worktreePath={worktreePath}
-              activeSectionKey={activeSectionKey}
-              sectionIndexByKey={sectionIndexByKey}
-              isCollapsed={collapsedDirectoryKeys.has(node.key)}
-              visibleFileCount={branchVisibleRows?.visibleFileCounts.get(node.key)}
-              onToggleDirectory={toggleDirectory}
-              onNavigate={onNavigate}
-            />
-          ))
+          <CombinedDiffFileTreeRows
+            rows={branchVisibleRows?.rows ?? branchRows}
+            visibleFileCounts={branchVisibleRows?.visibleFileCounts}
+            {...sharedRowProps}
+          />
         )}
       </div>
       <div

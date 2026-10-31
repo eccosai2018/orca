@@ -6,11 +6,10 @@ import {
   appendTabGroupLayout,
   pruneTabGroupLayout,
   tabGroupLayoutEqual
-} from './layout-helpers'
+} from './tab-group-layout-tree'
 
 type ActiveStateContext = ReturnType<typeof applyWorktreeRecordUpdates>
 
-/** Resolve active ids, visible type, layout, and tab-bar order after reconciliation. */
 export function applyActiveStateUpdates(context: ActiveStateContext) {
   const {
     state,

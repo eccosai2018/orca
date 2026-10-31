@@ -1,5 +1,5 @@
 import type React from 'react'
-import { PanelLeftOpen, Sparkles, WrapText } from 'lucide-react'
+import { PanelLeftOpen, Space, Sparkles, WrapText } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -9,6 +9,32 @@ import type { DiffComment } from '../../../../../../shared/diff-comment-types'
 import { DiffNotesSendMenu } from '../../DiffNotesSendMenu'
 import { DiffNotesPreviewPopover } from './combined-diff-notes-popover'
 
+function changedFilesSummary(
+  count: number,
+  baseRef: string | null,
+  compareRef: string | null
+): string {
+  if (baseRef !== null) {
+    return translate(
+      'auto.components.editor.CombinedDiffViewer.changedFilesVs',
+      '{{count}} changed files vs {{baseRef}}',
+      { count, baseRef, defaultValue_one: '{{count}} changed file vs {{baseRef}}' }
+    )
+  }
+  if (compareRef !== null) {
+    return translate(
+      'auto.components.editor.CombinedDiffViewer.changedFilesIn',
+      '{{count}} changed files in {{compareRef}}',
+      { count, compareRef, defaultValue_one: '{{count}} changed file in {{compareRef}}' }
+    )
+  }
+  return translate(
+    'auto.components.editor.CombinedDiffViewer.changedFiles',
+    '{{count}} changed files',
+    { count, defaultValue_one: '{{count}} changed file' }
+  )
+}
+
 export function CombinedDiffToolbar({
   activeGroupId,
   allSectionsCollapsed,
@@ -16,6 +42,7 @@ export function CombinedDiffToolbar({
   commitCompare,
   diffCommentCount,
   diffCommentsForWorktree,
+  diffShowWhitespace,
   diffWordWrap,
   file,
   fileTreeCollapsed,
@@ -31,6 +58,7 @@ export function CombinedDiffToolbar({
   sectionCount,
   setAllSectionsCollapsed,
   sideBySide,
+  toggleDiffShowWhitespace,
   toggleDiffWordWrap,
   toggleSideBySide
 }: {
@@ -40,6 +68,7 @@ export function CombinedDiffToolbar({
   commitCompare: NonNullable<OpenFile['commitCompare']> | null
   diffCommentCount: number
   diffCommentsForWorktree: DiffComment[]
+  diffShowWhitespace: boolean | undefined
   diffWordWrap: boolean | undefined
   file: OpenFile
   fileTreeCollapsed: boolean
@@ -55,6 +84,7 @@ export function CombinedDiffToolbar({
   sectionCount: number
   setAllSectionsCollapsed: (collapsed: boolean) => void
   sideBySide: boolean
+  toggleDiffShowWhitespace: () => void
   toggleDiffWordWrap: () => void
   toggleSideBySide: () => void
 }): React.JSX.Element {
@@ -83,18 +113,11 @@ export function CombinedDiffToolbar({
           </Tooltip>
         )}
         <span className="truncate text-xs text-muted-foreground">
-          {sectionCount}{' '}
-          {translate('auto.components.editor.CombinedDiffViewer.7e7ca60816', 'changed files')}
-          {(isAllMode || isBranchMode) && branchCompare
-            ? translate('auto.components.editor.CombinedDiffViewer.6094135eec', ' vs {{value0}}', {
-                value0: branchCompare.baseRef
-              })
-            : ''}
-          {isCommitMode && commitCompare
-            ? translate('auto.components.editor.CombinedDiffViewer.724a13568d', ' in {{value0}}', {
-                value0: commitCompare.compareRef
-              })
-            : ''}
+          {changedFilesSummary(
+            sectionCount,
+            (isAllMode || isBranchMode) && branchCompare ? branchCompare.baseRef : null,
+            isCommitMode && commitCompare ? commitCompare.compareRef : null
+          )}
         </span>
         {diffCommentCount > 0 && (
           <div className="ml-1 flex shrink-0 items-center overflow-hidden rounded-full border border-border/70 bg-muted/40">
@@ -104,12 +127,9 @@ export function CombinedDiffToolbar({
                   type="button"
                   className="inline-flex h-6 items-center gap-1 pl-2 pr-1.5 text-[11px] font-medium leading-none text-foreground/80 transition-colors hover:bg-accent hover:text-foreground"
                   aria-label={translate(
-                    'auto.components.editor.CombinedDiffViewer.8f68ad9ca9',
-                    'Show {{value0}} AI {{value1}}',
-                    {
-                      value0: diffCommentCount,
-                      value1: diffCommentCount === 1 ? 'note' : 'notes'
-                    }
+                    'auto.components.editor.CombinedDiffViewer.showAiNotes',
+                    'Show {{count}} AI notes',
+                    { count: diffCommentCount, defaultValue_one: 'Show {{count}} AI note' }
                   )}
                 >
                   <Sparkles className="size-3 text-violet-500 dark:text-violet-400" />
@@ -135,7 +155,7 @@ export function CombinedDiffToolbar({
               worktreeId={file.worktreeId}
               groupId={activeGroupId ?? file.worktreeId}
               comments={diffCommentsForWorktree}
-              actionLabel="Send"
+              actionLabel={translate('auto.components.editor.CombinedDiffViewer.send', 'Send')}
               triggerClassName="h-6 gap-1 rounded-none border-l border-border/70 px-2 text-[11px] font-medium leading-none text-foreground/80 hover:bg-accent hover:text-foreground"
               iconClassName="size-3"
             />
@@ -186,6 +206,18 @@ export function CombinedDiffToolbar({
           {diffWordWrap === true
             ? translate('auto.components.editor.CombinedDiffViewer.a4420ca1f7', 'Wrap On')
             : translate('auto.components.editor.CombinedDiffViewer.dde325ddfe', 'Wrap Off')}
+        </button>
+        <button
+          className={`inline-flex h-6 items-center gap-1 rounded border border-border px-2 text-xs transition-colors hover:text-foreground ${
+            diffShowWhitespace === true ? 'bg-accent text-foreground' : 'text-muted-foreground'
+          }`}
+          onClick={toggleDiffShowWhitespace}
+          aria-pressed={diffShowWhitespace === true}
+        >
+          <Space className="size-3.5" />
+          {diffShowWhitespace === true
+            ? translate('auto.components.editor.CombinedDiffViewer.2e91bc89d1', 'Whitespace On')
+            : translate('auto.components.editor.CombinedDiffViewer.2bf19c54ad', 'Whitespace Off')}
         </button>
       </div>
     </div>

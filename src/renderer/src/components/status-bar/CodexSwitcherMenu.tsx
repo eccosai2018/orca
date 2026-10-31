@@ -80,8 +80,7 @@ export function CodexSwitcherMenu({
       iconOnly={iconOnly}
       asSubmenu={asSubmenu}
       triggerContent={triggerContent}
-      // Why: Codex reset credits render beside the reset action below; showing
-      // them in the generic provider summary duplicates the same metadata.
+      // Reset credits render beside the action below; suppress the generic summary’s duplicate.
       hidePanelResetCredits
       ariaLabel={translate(
         'auto.components.status.bar.StatusBar.ba55303942',
@@ -144,16 +143,14 @@ export function CodexSwitcherMenu({
         <>
           <DropdownMenuLabel className="space-y-0.5">
             <div>
-              {resetCreditCount === 1
-                ? translate(
-                    'auto.components.status.bar.StatusBar.5e5f9f5160',
-                    '1 rate-limit reset available'
-                  )
-                : translate(
-                    'auto.components.status.bar.StatusBar.5ecae9197c',
-                    '{{value0}} rate-limit resets available',
-                    { value0: resetCreditCount }
-                  )}
+              {translate(
+                'auto.components.status.bar.StatusBar.rateLimitResetsAvailable',
+                '{{count}} rate-limit resets available',
+                {
+                  count: resetCreditCount,
+                  defaultValue_one: '{{count}} rate-limit reset available'
+                }
+              )}
             </div>
             {resetCreditExpiry ? (
               <div className="text-[11px] font-normal text-muted-foreground">
@@ -239,7 +236,9 @@ export function CodexSwitcherMenu({
                     >
                       <div className="flex w-full min-w-0 flex-col gap-0.5">
                         <div className="flex min-w-0 items-center gap-2">
-                          <span className="min-w-0 flex-1 truncate">{target.label}</span>
+                          <span className="min-w-0 flex-1 whitespace-normal break-words">
+                            {target.label}
+                          </span>
                           {target.active ? (
                             <span className="shrink-0 text-[10px] font-medium text-muted-foreground">
                               {translate(
@@ -249,7 +248,13 @@ export function CodexSwitcherMenu({
                             </span>
                           ) : null}
                         </div>
-                        {inactiveUsage?.isFetching && !inactiveUsage.rateLimits ? (
+                        {/* Why: rows follow this desktop's codexTarget, so a remote owner's usage could land on the wrong row. */}
+                        {target.active && !hasActiveRuntimeEnvironment ? (
+                          <InlineUsageBars
+                            limits={codex}
+                            isFetching={codex.status === 'fetching'}
+                          />
+                        ) : inactiveUsage?.isFetching && !inactiveUsage.rateLimits ? (
                           <InlineUsageSkeleton />
                         ) : showSignInAction ? (
                           <InlineUsageSignInAction

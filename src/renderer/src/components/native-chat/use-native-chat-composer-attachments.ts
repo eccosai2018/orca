@@ -1,30 +1,46 @@
-import { useCallback, useLayoutEffect, useRef, useState, type RefObject } from 'react'
-import { translate } from '@/i18n/i18n'
-import { NATIVE_FILE_DROP_MAX_PATHS } from '../../../../shared/native-file-drop'
-import { isNativeChatImageAttachmentPath } from './native-chat-image-paste'
+import type {
+  UseNativeChatComposerAttachmentsArgs,
+  NativeChatComposerAttachments
+} from './native-chat-composer-attachment-contract'
+export type { UseNativeChatComposerAttachmentsArgs } from './native-chat-composer-attachment-contract'
+import { useCallback, useEffect, useLayoutEffect, useMemo } from 'react'
 import {
-  formatNativeChatFileReference,
   nativeChatComposerTargetIsRemote,
-  type NativeChatResolvedTarget
+  nativeChatLocalAttachmentUnsupportedNotice
 } from './native-chat-composer-target'
-import type { NativeChatComposerImageAttachment } from './NativeChatComposerField'
-import { setBoundedScopeCacheEntry } from './native-chat-composer-scope-cache'
-
-export type UseNativeChatComposerAttachmentsArgs = {
-  attachmentScopeKey: string
-  allowWithoutTarget?: boolean
-  caret: number
-  disabled: boolean
-  isComposing: () => boolean
-  resolveTarget: () => NativeChatResolvedTarget | null
-  textareaRef: RefObject<HTMLTextAreaElement | null>
-  setCaret: (caret: number) => void
-  setDraft: (updater: (previous: string) => string) => void
-  setNotice: (notice: string | null) => void
-}
+import {
+  captureNativeChatEditDraftDestination,
+  updateNativeChatComposerDraft
+} from './native-chat-composer-draft-store'
+import { useNativeChatResolvedPathAttachments } from './use-native-chat-resolved-path-attachments'
+import type {
+  NativeChatPendingAttachmentChips,
+  NativeChatPendingAttachmentOptions
+} from './native-chat-session-attachment-drop'
+import {
+  addNativeChatPendingAttachment,
+  appendNativeChatAttachmentsAfterPending,
+  clearNativeChatPendingAttachments,
+  settleNativeChatPendingAttachment,
+  settleNativeChatPendingAttachmentReferences,
+  nativeChatPendingAttachmentSnapshot
+} from './native-chat-pending-attachment-cache'
+import { useNativeChatComposerImageChips } from './use-native-chat-composer-image-chips'
+import { createUuidV4 } from '../../../../shared/uuid-v4'
+import {
+  insertImageReferences,
+  nativeChatImageRowIds,
+  removeImageWithReferences,
+  settlePendingImageReferences,
+  takePendingImageWithReferences
+} from './native-chat-composer-image-references'
+import { isNativeChatImageAttachmentPath } from './native-chat-image-paste'
+import { useNativeChatPastedTextAdmission } from './native-chat-pasted-text-state'
 
 export function useNativeChatComposerAttachments({
   attachmentScopeKey,
+  acceptsImages = true,
+  imageReferences = false,
   allowWithoutTarget = false,
   caret,
   disabled,
@@ -34,200 +50,262 @@ export function useNativeChatComposerAttachments({
   setCaret,
   setDraft,
   setNotice
-}: UseNativeChatComposerAttachmentsArgs): {
-  imageAttachments: NativeChatComposerImageAttachment[]
-  attachResolvedPaths: (paths: string[], connectionId?: string | null) => void
-  clearImageAttachments: () => void
-  flushPendingAttachments: () => void
-  removeImageAttachment: (id: string) => void
-} {
-  const [imageAttachments, setImageAttachments] = useState<NativeChatComposerImageAttachment[]>(
-    () => readNativeChatAttachmentCache(attachmentScopeKey)
-  )
-  const imageAttachmentCounter = useRef(0)
-  const pendingResolvedPathsRef = useRef<{ path: string; connectionId?: string | null }[]>([])
-  const pendingPathLimitRejectedRef = useRef(false)
-  const disabledRef = useRef(disabled)
-
-  useLayoutEffect(() => {
-    disabledRef.current = disabled
-    if (disabled) {
-      pendingResolvedPathsRef.current = []
-      pendingPathLimitRejectedRef.current = false
-    }
-  }, [disabled])
-
-  const updateImageAttachments = useCallback(
-    (
-      updater: (
-        previous: NativeChatComposerImageAttachment[]
-      ) => NativeChatComposerImageAttachment[]
-    ) => {
-      setImageAttachments((prev) => {
-        const next = updater(prev)
-        writeNativeChatAttachmentCache(attachmentScopeKey, next)
-        return next
-      })
-    },
+}: UseNativeChatComposerAttachmentsArgs): NativeChatComposerAttachments {
+  const destination = useMemo(
+    () => captureNativeChatEditDraftDestination(attachmentScopeKey),
     [attachmentScopeKey]
   )
+  const destinationScope = useCallback(
+    (): string => destination?.scopeKey ?? attachmentScopeKey,
+    [destination, attachmentScopeKey]
+  )
+  const { imageAttachments, setPreview, releasePreview, releaseAllPreviews } =
+    useNativeChatComposerImageChips(attachmentScopeKey)
+  const mountedRef = useMemo(
+    () => ({ scopeKey: attachmentScopeKey, current: true, acceptsImages: true }),
+    [attachmentScopeKey]
+  )
+  // Captured callbacks retain this scope's last committed capability after unmount.
+  useLayoutEffect(() => {
+    mountedRef.acceptsImages = acceptsImages
+  }, [acceptsImages, mountedRef])
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [mountedRef])
+
+  const nextAttachmentId = useCallback(() => createUuidV4(), [])
+  const serverOwnedPendingIds = useMemo(() => new Set<string>(), [])
+
+  // Only provenance-checked workspace paths may bypass the ban on client-local files crossing runtime targets.
+  const attachmentTargetBlocked = useCallback(
+    (targetOwned = false): boolean => {
+      const target = resolveTarget()
+      return (
+        (!target && !allowWithoutTarget) ||
+        Boolean(target && nativeChatComposerTargetIsRemote(target.ptyId) && !targetOwned)
+      )
+    },
+    [allowWithoutTarget, resolveTarget]
+  )
+
+  const noteAttachmentTargetBlocked = useCallback(() => {
+    setNotice(nativeChatLocalAttachmentUnsupportedNotice())
+  }, [setNotice])
+
+  // Uploads outlive conversation switches; target only this scope’s editor or stored draft.
+  const scopeEditor = useCallback(
+    () =>
+      mountedRef.current && destinationScope() === attachmentScopeKey ? textareaRef.current : null,
+    [attachmentScopeKey, destinationScope, mountedRef, textareaRef]
+  )
+  useLayoutEffect(() => {
+    if (disabled && !attachmentScopeKey.startsWith('queued-edit:')) {
+      settlePendingImageReferences(destinationScope(), scopeEditor(), () =>
+        clearNativeChatPendingAttachments(attachmentScopeKey)
+      )
+    }
+  }, [attachmentScopeKey, destinationScope, disabled, scopeEditor])
 
   const appendImageAttachments = useCallback(
     (paths: { path: string; connectionId?: string | null }[]) => {
-      if (paths.length === 0) {
+      const images = paths.map(({ path, connectionId }) => ({
+        id: nextAttachmentId(),
+        path,
+        ...(connectionId ? { connectionId } : {})
+      }))
+      appendNativeChatAttachmentsAfterPending(attachmentScopeKey, images, { fromUser: true })
+      if (!imageReferences) {
         return
       }
-      updateImageAttachments((prev) => [
-        ...prev,
-        ...paths.map(({ path, connectionId }) => {
-          imageAttachmentCounter.current += 1
-          return {
-            id: `${Date.now()}-${imageAttachmentCounter.current}`,
-            path,
-            connectionId: connectionId ?? undefined
-          }
-        })
-      ])
+      // One that took an unavailable image's place keeps that image's id, and so its chips.
+      const row = nativeChatImageRowIds(destinationScope())
+      insertImageReferences(
+        attachmentScopeKey,
+        scopeEditor(),
+        images.flatMap(({ id }) => (row.includes(id) ? [id] : []))
+      )
     },
-    [updateImageAttachments]
+    [attachmentScopeKey, destinationScope, imageReferences, nextAttachmentId, scopeEditor]
   )
 
-  const insertFileReferences = useCallback(
-    (paths: string[]) => {
-      const references = paths.map(formatNativeChatFileReference).join(' ')
-      if (references.length === 0) {
-        return
-      }
-      const insertion = `${references} `
-      const caretAtInsert = textareaRef.current?.selectionStart ?? caret
-      setDraft((prev) => {
-        const before = prev.slice(0, caretAtInsert)
-        const after = prev.slice(caretAtInsert)
-        const next = before + insertion + after
-        setCaret(before.length + insertion.length)
-        return next
-      })
-    },
-    [caret, setCaret, setDraft, textareaRef]
-  )
-
-  // Attach paths the TARGET AGENT can read: local paths for local worktrees,
-  // already-uploaded remote paths for SSH worktrees (the composer uploads
-  // before calling this — see native-chat-attachment-upload.ts).
-  const applyResolvedPaths = useCallback(
-    (
-      resolvedPaths: { path: string; connectionId?: string | null }[],
-      focus: boolean,
-      preserveNotice = false
-    ) => {
-      const target = resolveTarget()
-      if (
-        (!target && !allowWithoutTarget) ||
-        (target && nativeChatComposerTargetIsRemote(target.ptyId))
-      ) {
-        setNotice(
-          translate(
-            'components.native-chat.composer.localAttachmentUnsupported',
-            'Local attachments are not available for remote sessions.'
-          )
-        )
-        return
-      }
-      const imagePaths = resolvedPaths.filter(({ path }) => isNativeChatImageAttachmentPath(path))
-      const filePaths = resolvedPaths
-        .filter(({ path }) => !isNativeChatImageAttachmentPath(path))
-        .map(({ path }) => path)
-      // Images are NOT sent to the TUI here — they ride along on submit (see
-      // NativeChatComposer.send) so the GUI chips and the TUI input never
-      // diverge and removing a chip needs no TUI un-paste.
-      appendImageAttachments(imagePaths.map(({ path, connectionId }) => ({ path, connectionId })))
-      insertFileReferences(filePaths)
-      if (!preserveNotice) {
-        setNotice(null)
-      }
-      if (focus && resolvedPaths.length > 0) {
-        requestAnimationFrame(() => textareaRef.current?.focus())
-      }
-    },
-    [
-      allowWithoutTarget,
+  const { attachResolvedPaths, disabledRef, flushPendingAttachments } =
+    useNativeChatResolvedPathAttachments({
+      acceptsImages,
       appendImageAttachments,
-      insertFileReferences,
-      resolveTarget,
+      attachmentTargetBlocked,
+      caret,
+      disabled,
+      isComposing,
+      mountedRef,
+      noteAttachmentTargetBlocked,
+      setCaret,
+      setDraft,
       setNotice,
       textareaRef
+    })
+
+  // Show pending chips immediately so slow saves/uploads do not look like lost pastes.
+  const beginPendingImageAttachment = useCallback(
+    (previewUrl?: string, pendingName?: string, serverOwned = false): string | null => {
+      if (destination ? !destination.active : disabledRef.current) {
+        return null
+      }
+      if (attachmentTargetBlocked(serverOwned)) {
+        noteAttachmentTargetBlocked()
+        return null
+      }
+      const id = nextAttachmentId()
+      if (serverOwned) {
+        serverOwnedPendingIds.add(id)
+      }
+      addNativeChatPendingAttachment(destinationScope(), {
+        id,
+        path: '',
+        pending: true,
+        ...(pendingName ? { pendingName } : {})
+      })
+      setPreview(id, previewUrl)
+      // A dropped file's kind shows in its name; a clipboard paste is always an image.
+      if (
+        imageReferences &&
+        acceptsImages &&
+        (!pendingName || isNativeChatImageAttachmentPath(pendingName))
+      ) {
+        insertImageReferences(destinationScope(), scopeEditor(), [id])
+      }
+      return id
+    },
+    [
+      acceptsImages,
+      destination,
+      destinationScope,
+      attachmentTargetBlocked,
+      disabledRef,
+      imageReferences,
+      nextAttachmentId,
+      noteAttachmentTargetBlocked,
+      scopeEditor,
+      serverOwnedPendingIds,
+      setPreview
     ]
   )
 
-  const attachResolvedPaths = useCallback(
-    (paths: string[], connectionId?: string | null) => {
-      if (paths.length === 0 || disabledRef.current) {
-        return
-      }
-      if (isComposing()) {
-        if (paths.length > NATIVE_FILE_DROP_MAX_PATHS - pendingResolvedPathsRef.current.length) {
-          // Reject the whole completion so ordered path batches are never partially applied.
-          pendingPathLimitRejectedRef.current = true
-          setNotice(
-            translate(
-              'components.native-chat.composer.pendingAttachmentLimit',
-              'Too many attachments are waiting. Finish composing before attaching more.'
-            )
-          )
-          return
-        }
-        pendingResolvedPathsRef.current.push(...paths.map((path) => ({ path, connectionId })))
-        return
-      }
-      applyResolvedPaths(
-        paths.map((path) => ({ path, connectionId })),
-        true
-      )
-    },
-    [applyResolvedPaths, isComposing, setNotice]
+  const attachPendingReferences = useCallback(
+    (
+      references: { id: string; path: string }[],
+      options?: NativeChatPendingAttachmentOptions,
+      serverOwned = false
+    ) =>
+      settlePendingImageReferences(destinationScope(), scopeEditor(), () =>
+        settleNativeChatPendingAttachmentReferences(
+          attachmentScopeKey,
+          references,
+          options?.insertReferences !== undefined
+            ? (options.insertReferences ?? undefined)
+            : mountedRef.current && !disabledRef.current && !isComposing()
+              ? (paths) =>
+                  // The paste re-checked the owner just before settling a server-owned image.
+                  attachResolvedPaths(
+                    paths,
+                    null,
+                    serverOwned ? { ...options, targetOwnerIsCurrent: () => true } : options
+                  )
+              : undefined
+        )
+      ),
+    [
+      attachResolvedPaths,
+      attachmentScopeKey,
+      destinationScope,
+      disabledRef,
+      isComposing,
+      mountedRef,
+      scopeEditor
+    ]
   )
 
-  const flushPendingAttachments = useCallback(() => {
-    const paths = pendingResolvedPathsRef.current
-    const preserveNotice = pendingPathLimitRejectedRef.current
-    pendingResolvedPathsRef.current = []
-    pendingPathLimitRejectedRef.current = false
-    if (paths.length === 0 || disabledRef.current) {
-      return
-    }
-    applyResolvedPaths(paths, false, preserveNotice)
-  }, [applyResolvedPaths])
+  const resolvePendingImageAttachment = useCallback(
+    (
+      id: string,
+      path: string,
+      connectionId?: string | null,
+      options?: NativeChatPendingAttachmentOptions
+    ) => {
+      const serverOwned = serverOwnedPendingIds.delete(id)
+      return mountedRef.acceptsImages
+        ? settlePendingImageReferences(destinationScope(), scopeEditor(), () =>
+            settleNativeChatPendingAttachment(destinationScope(), id, path, connectionId)
+          )
+        : attachPendingReferences([{ id, path }], options, serverOwned)
+    },
+    [attachPendingReferences, destinationScope, mountedRef, scopeEditor, serverOwnedPendingIds]
+  )
+
+  const revealPendingImageAttachment = useCallback(
+    (id: string, previewUrl?: string) => {
+      if (nativeChatPendingAttachmentSnapshot(destinationScope()).some((chip) => chip.id === id)) {
+        setPreview(id, previewUrl)
+      }
+    },
+    [destinationScope, setPreview]
+  )
+
+  // Unsaved pending-chip removal must not modify the draft, even from a replaced composer.
+  const dropPendingImageAttachment = useCallback(
+    (id: string): boolean => {
+      releasePreview(id)
+      serverOwnedPendingIds.delete(id)
+      return takePendingImageWithReferences(destinationScope(), scopeEditor(), id) !== undefined
+    },
+    [destinationScope, releasePreview, scopeEditor, serverOwnedPendingIds]
+  )
+
+  const pendingChips = useMemo(
+    (): NativeChatPendingAttachmentChips => ({
+      begin: beginPendingImageAttachment,
+      resolve: resolvePendingImageAttachment,
+      drop: dropPendingImageAttachment,
+      // Use the caret while mounted; persist into the scope draft through IME composition and unmounts.
+      attachReferences: attachPendingReferences
+    }),
+    [
+      attachPendingReferences,
+      beginPendingImageAttachment,
+      dropPendingImageAttachment,
+      resolvePendingImageAttachment
+    ]
+  )
+
+  const pastedTextSaving = useNativeChatPastedTextAdmission(attachmentScopeKey) === 'saving'
 
   return {
+    pendingChips,
+    scopeEditor,
     imageAttachments,
+    pastedTextSaving,
     attachResolvedPaths,
-    clearImageAttachments: () => updateImageAttachments(() => []),
+    clearImageAttachments: () => {
+      releaseAllPreviews()
+      clearNativeChatPendingAttachments(attachmentScopeKey)
+      updateNativeChatComposerDraft(attachmentScopeKey, { images: [] }, 'immediate')
+    },
     flushPendingAttachments,
-    removeImageAttachment: (id) =>
-      updateImageAttachments((prev) => prev.filter((attachment) => attachment.id !== id))
+    removeImageAttachment: (id) => {
+      releasePreview(id)
+      removeImageWithReferences(attachmentScopeKey, scopeEditor(), id)
+    },
+    beginPendingImageAttachment,
+    resolvePendingImageAttachment,
+    revealPendingImageAttachment,
+    dropPendingImageAttachment
   }
 }
 
-const attachmentCache = new Map<string, NativeChatComposerImageAttachment[]>()
-
-export function readNativeChatAttachmentCache(
-  scopeKey: string
-): NativeChatComposerImageAttachment[] {
-  return [...(attachmentCache.get(scopeKey) ?? [])]
-}
-
-function writeNativeChatAttachmentCache(
-  scopeKey: string,
-  attachments: readonly NativeChatComposerImageAttachment[]
-): void {
-  if (attachments.length === 0) {
-    attachmentCache.delete(scopeKey)
-    return
-  }
-  // LRU-bounded so pending attachments for permanently-removed panes can't accumulate.
-  setBoundedScopeCacheEntry(attachmentCache, scopeKey, [...attachments])
-}
-
-export function clearNativeChatAttachmentCacheForTests(): void {
-  attachmentCache.clear()
-}
+export {
+  readNativeChatAttachmentCache,
+  appendNativeChatAttachmentCache,
+  clearNativeChatAttachmentCacheForTests
+} from './native-chat-draft-cache'

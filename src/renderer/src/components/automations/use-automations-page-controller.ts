@@ -16,19 +16,33 @@ import { useAutomationsPageRefresh } from './use-automations-page-refresh'
 import { useAutomationsPageSetupState } from './use-automations-page-setup-state'
 import { useAutomationsPageStoreState } from './use-automations-page-store-state'
 import { useExternalAutomationActions } from './use-external-automation-actions'
+import { useAutomationRunsDashboard } from './use-automation-runs-dashboard'
 
 export function useAutomationsPageController() {
   const store = useAutomationsPageStoreState()
   const local = useAutomationsPageLocalState(store)
   const list = useAutomationsPageListState({ store, local })
   const destination = useAutomationsPageDestinationState({ store, local, list })
+  const runsDashboard = useAutomationRunsDashboard({
+    enabled: local.pageView === 'runs',
+    rows: list.visibleRows,
+    context: destination.automationDispatchContext,
+    legacyTarget: destination.automationHostTargetFor,
+    authorityForRow: destination.automationAuthorityForRow,
+    reloadToken: local.runHistoryReloadToken
+  })
   const destinationForm = useAutomationsPageDestinationForm({
     store,
     local,
     list,
     base: destination
   })
-  const setup = useAutomationsPageSetupState({ store, local, list })
+  const setup = useAutomationsPageSetupState({
+    store,
+    local,
+    list,
+    draftRepos: destinationForm.dialogRepos
+  })
   const runPage = useAutomationRunPageState({ store, local, list, setup })
   const sourceAvailability = useAutomationSourceAvailability(list.visibleRows)
   const presentation = useAutomationsPagePresentationState({
@@ -46,7 +60,6 @@ export function useAutomationsPageController() {
     destination
   })
   const draftEffects = useAutomationDraftEffects({
-    store,
     local,
     setup,
     destination,
@@ -90,6 +103,7 @@ export function useAutomationsPageController() {
     local,
     list,
     destination,
+    runsDashboard,
     destinationForm,
     setup,
     runPage,
