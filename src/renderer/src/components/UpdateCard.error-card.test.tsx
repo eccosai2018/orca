@@ -122,7 +122,7 @@ describe('UpdateCard staged install recovery', () => {
   })
 
   it.each([
-    ['busy', 'Another Orca is updating', /Wait a moment/],
+    ['busy', 'Another Dark Factory is updating', /Wait a moment/],
     ['unresponsive', 'Waiting for background servers', /Stop it from the terminal/]
   ] as const)('gives a specific next step for %s', (reason, title, guidance) => {
     renderWithInitialStatus({
@@ -140,7 +140,7 @@ describe('UpdateCard staged install recovery', () => {
   it('shows preparation feedback without another install button while recovery runs', () => {
     renderWithInitialStatus({ state: 'downloaded', version: '1.4.200', installing: true })
     expect(screen.getByText('Preparing your update')).toBeTruthy()
-    expect(screen.getByText(/Checking running Orca instances/)).toBeTruthy()
+    expect(screen.getByText(/Checking running Dark Factory instances/)).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Restart to Update' })).toBeNull()
     expect(quitAndInstall).not.toHaveBeenCalled()
   })
@@ -188,7 +188,7 @@ describe('UpdateCard Windows signature failures', () => {
     expect(screen.queryByText(message)).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: 'Check official releases' }))
-    expect(openUrl).toHaveBeenCalledWith('https://github.com/stablyai/orca/releases')
+    expect(openUrl).toHaveBeenCalledWith('https://github.com/eccosai2018/orca/releases')
     expect(openUrl).not.toHaveBeenCalledWith(expect.stringContaining('/tag/'))
   })
 
@@ -326,7 +326,7 @@ describe('UpdateCard Linux package-install recovery', () => {
 
     expect(screen.getByText('Manual Install Required')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Download Manually' }))
-    expect(openUrl).toHaveBeenCalledWith('https://github.com/stablyai/orca/releases/tag/v1.4.200')
+    expect(openUrl).toHaveBeenCalledWith('https://github.com/eccosai2018/orca/releases/tag/v1.4.200')
   })
 
   it('uses the recovery version when cached update state is stale', () => {
@@ -334,7 +334,7 @@ describe('UpdateCard Linux package-install recovery', () => {
     showPackageRecovery()
 
     fireEvent.click(screen.getByRole('button', { name: 'Download Manually' }))
-    expect(openUrl).toHaveBeenCalledWith('https://github.com/stablyai/orca/releases/tag/v1.4.200')
+    expect(openUrl).toHaveBeenCalledWith('https://github.com/eccosai2018/orca/releases/tag/v1.4.200')
   })
 
   it.each([
@@ -377,7 +377,7 @@ describe('UpdateCard Linux package-install recovery', () => {
     await flushActions()
 
     fireEvent.click(screen.getByRole('button', { name: 'Download Manually' }))
-    expect(openUrl).toHaveBeenCalledWith('https://github.com/stablyai/orca/releases/tag/v1.4.200')
+    expect(openUrl).toHaveBeenCalledWith('https://github.com/eccosai2018/orca/releases/tag/v1.4.200')
   })
 
   it('resets command discovery when a newer package cycle replaces the recovery', async () => {
@@ -416,7 +416,7 @@ describe('UpdateCard Linux package-install recovery', () => {
     expect(screen.queryByText('Manual Install Required')).toBeNull()
     expect(screen.queryByRole('button', { name: 'Retry Download' })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Download Manually' }))
-    expect(openUrl).toHaveBeenCalledWith('https://github.com/stablyai/orca/releases/tag/v1.4.200')
+    expect(openUrl).toHaveBeenCalledWith('https://github.com/eccosai2018/orca/releases/tag/v1.4.200')
   })
 
   it('keeps generic errors on the generic card when no recovery is attached', () => {
